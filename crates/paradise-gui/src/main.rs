@@ -69,6 +69,7 @@ struct Job {
     variant: Variant,
     font: FontChoice,
     runtime_language: bool,
+    redraw_shared: bool,
     dry_run: bool,
     output: String,
 }
@@ -81,6 +82,7 @@ struct App {
     font: FontChoice,
     mapping: Option<MappingFile>,
     runtime_language: bool,
+    redraw_shared: bool,
     dry_run: bool,
     log: Vec<String>,
     rx: Option<Receiver<Msg>>,
@@ -145,6 +147,7 @@ fn run_job(job: &Job, log: &mut dyn FnMut(String)) -> Result<Finished> {
         variant: job.variant,
         font: job.font,
         runtime_language: job.runtime_language,
+        redraw_shared: job.redraw_shared,
         mapping,
     };
     let result = patch(&rom, &opts, &mut |m| log(m.to_string()))?;
@@ -185,6 +188,7 @@ impl App {
             font: FontChoice::default(),
             mapping: None,
             runtime_language: true,
+            redraw_shared: true,
             dry_run: false,
             log: Vec::new(),
             rx: None,
@@ -273,6 +277,7 @@ impl App {
             variant: self.variant,
             font: self.font,
             runtime_language: self.runtime_language,
+            redraw_shared: self.redraw_shared,
             dry_run: self.dry_run,
             output: self.output.clone(),
         };
@@ -521,6 +526,10 @@ impl App {
         ui.checkbox(
             &mut self.runtime_language,
             "Add a Language entry to Settings (4th item) so the language can be changed any time (experimental)",
+        );
+        ui.checkbox(
+            &mut self.redraw_shared,
+            "Redraw characters shared with Simplified (定, 哦) in the chosen font so every glyph matches",
         );
         ui.checkbox(
             &mut self.dry_run,

@@ -11,6 +11,8 @@ use crate::strings::StringTable;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SlotKind {
     Reskin,
+    /// A glyph the game already draws correctly, redrawn only to match the chosen font.
+    Restyle,
     Overflow,
 }
 
@@ -37,7 +39,10 @@ pub struct PlanStats {
     pub chars_converted: usize,
     pub reused_codes: usize,
     pub reskinned: usize,
+    pub restyled: usize,
     pub overflow: usize,
+    /// Shared glyphs left in the game's own style because no spare slot was free.
+    pub restyle_skipped: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -53,6 +58,8 @@ pub struct PlanInput<'a> {
     pub pack: &'a GlyphPack,
     pub zh: &'a StringTable,
     pub others: &'a [&'a StringTable],
+    /// Redraw characters the game already has so every glyph matches the chosen font.
+    pub restyle_shared: bool,
 }
 
 fn is_traditional_encodable(c: char) -> bool {
@@ -83,7 +90,7 @@ pub fn build_plan(input: &PlanInput, conv: &Converter) -> Plan {
     // target char -> source code -> occurrences
     let mut needs: BTreeMap<char, BTreeMap<u16, usize>> = BTreeMap::new();
     let mut source_counts: HashMap<u16, (usize, usize)> = HashMap::new();
-    let mut direct_outputs: HashSet<u16> = HashSet::new();
+    let mut direct_outputs: BTreeMap<u16, usize> = BTreeMap::new();
     for tokens in &converted {
         for t in tokens {
             let Some(target) = t.target else { continue };
@@ -99,10 +106,10 @@ pub fn build_plan(input: &PlanInput, conv: &Converter) -> Plan {
             let e = source_counts.entry(t.code).or_default();
             if target == src {
                 e.0 += 1;
-                direct_outputs.insert(t.code);
+                *direct_outputs.entry(t.code).or_default() += 1;
             } else if let Some(code) = cs.code_of(target) {
                 e.1 += 1;
-                direct_outputs.insert(code);
+                *direct_outputs.entry(code).or_default() += 1;
             } else {
                 *needs.entry(target).or_default().entry(t.code).or_default() += 1;
             }
@@ -110,7 +117,7 @@ pub fn build_plan(input: &PlanInput, conv: &Converter) -> Plan {
     }
 
     let mut protected: HashSet<u16> = codes_used(input.others);
-    protected.extend(direct_outputs.iter().copied());
+    protected.extend(direct_outputs.keys().copied());
     for (&target, srcs) in &needs {
         if !input.pack.contains(target) {
             protected.extend(srcs.keys().copied());
@@ -218,8 +225,43 @@ pub fn build_plan(input: &PlanInput, conv: &Converter) -> Plan {
         }
     }
 
+    let mut moved: HashMap<u16, u16> = HashMap::new();
+    let mut restyle_skipped = 0;
+    if input.restyle_shared {
+        let used_elsewhere = codes_used(input.others);
+        let mut shared: Vec<(u16, usize)> = direct_outputs
+            .iter()
+            .map(|(&code, &n)| (code, n))
+            .filter(|&(code, _)| cs.is_hanzi_code(code))
+            .collect();
+        shared.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        for (code, _) in shared {
+            let Some(ch) = cs.char_of_code(code).filter(|&c| input.pack.contains(c)) else {
+                continue;
+            };
+            if !used_elsewhere.contains(&code) {
+                edits.push(GlyphEdit {
+                    code,
+                    ch,
+                    kind: SlotKind::Restyle,
+                });
+            } else if let Some(slot) = pool_iter.next() {
+                moved.insert(code, slot);
+                edits.push(GlyphEdit {
+                    code: slot,
+                    ch,
+                    kind: SlotKind::Overflow,
+                });
+            } else {
+                restyle_skipped += 1;
+            }
+        }
+    }
+    let remap = |c: u16| moved.get(&c).copied().unwrap_or(c);
+
     let mut stats = PlanStats {
         strings_total: zh.strings.len(),
+        restyle_skipped,
         ..Default::default()
     };
     let mut out_strings = Vec::with_capacity(zh.strings.len());
@@ -236,10 +278,10 @@ pub fn build_plan(input: &PlanInput, conv: &Converter) -> Plan {
                 Some(target) => {
                     let src = cs.char_of_code(t.code).unwrap();
                     if target == src {
-                        t.code
+                        remap(t.code)
                     } else if let Some(c) = cs.code_of(target) {
                         stats.reused_codes += 1;
-                        c
+                        remap(c)
                     } else if let Some(&c) = assigned.get(&target) {
                         c
                     } else {
@@ -262,6 +304,7 @@ pub fn build_plan(input: &PlanInput, conv: &Converter) -> Plan {
         out_strings.push(out);
     }
     stats.reskinned = edits.iter().filter(|e| e.kind == SlotKind::Reskin).count();
+    stats.restyled = edits.iter().filter(|e| e.kind == SlotKind::Restyle).count();
     stats.overflow = edits
         .iter()
         .filter(|e| e.kind == SlotKind::Overflow)
@@ -303,6 +346,7 @@ mod tests {
                 pack,
                 zh: &zh,
                 others: &[],
+                restyle_shared: false,
             },
             &conv,
         );
@@ -311,6 +355,53 @@ mod tests {
         let chars: Vec<char> = plan.edits.iter().map(|e| e.ch).collect();
         assert!(chars.contains(&'個') && chars.contains(&'們') && chars.contains(&'國'));
         assert!(plan.edits.iter().all(|e| e.kind == SlotKind::Reskin));
+    }
+
+    fn plan_with_restyle(cs: &Charset, zh: &StringTable, others: &[&StringTable]) -> Plan {
+        let conv = Converter::new(Variant::HongKong).unwrap();
+        build_plan(
+            &PlanInput {
+                cs,
+                pack: GlyphPack::embedded(),
+                zh,
+                others,
+                restyle_shared: true,
+            },
+            &conv,
+        )
+    }
+
+    #[test]
+    fn shared_characters_are_redrawn_in_place() {
+        let cs = Charset::standard();
+        let zh = StringTable {
+            strings: vec![encode(&cs, "定哦")],
+        };
+        let plan = plan_with_restyle(&cs, &zh, &[]);
+        assert_eq!(plan.table.strings, zh.strings);
+        let mut chars: Vec<char> = plan.edits.iter().map(|e| e.ch).collect();
+        chars.sort();
+        assert_eq!(chars, vec!['哦', '定']);
+        assert!(plan.edits.iter().all(|e| e.kind == SlotKind::Restyle));
+        assert_eq!(plan.stats.restyled, 2);
+    }
+
+    #[test]
+    fn shared_characters_used_by_other_languages_move_to_spare_slots() {
+        let cs = Charset::standard();
+        let zh = StringTable {
+            strings: vec![encode(&cs, "定哦")],
+        };
+        let other = StringTable {
+            strings: vec![encode(&cs, "定")],
+        };
+        let plan = plan_with_restyle(&cs, &zh, &[&other]);
+        assert_eq!(plan.table.strings[0][1], zh.strings[0][1]);
+        assert_ne!(plan.table.strings[0][0], zh.strings[0][0]);
+        assert!(cs.is_hangul_code(plan.table.strings[0][0]));
+        let moved = plan.edits.iter().find(|e| e.ch == '定').unwrap();
+        assert_eq!(moved.kind, SlotKind::Overflow);
+        assert_eq!(moved.code, plan.table.strings[0][0]);
     }
 
     #[test]
@@ -330,6 +421,7 @@ mod tests {
                 pack,
                 zh: &zh,
                 others: &[&other],
+                restyle_shared: false,
             },
             &conv,
         );

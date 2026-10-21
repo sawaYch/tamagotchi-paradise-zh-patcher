@@ -13,6 +13,7 @@ You can use the web version (wasm) here: https://paradise-zh-patcher.void-dojo.w
 - Gives each converted character a glyph:
   - An existing glyph is reused when the game's font already has the Traditional character.
   - Simplified-only characters (个, 们, 国) are redrawn in place.
+  - Characters that are identical in Simplified and Traditional (定, 哦) are redrawn too, so every glyph comes from the chosen font instead of mixing it with the game's own. A character that another language also uses gets a spare slot instead of changing that language. Keep the game's original glyphs with `--keep-shared-glyphs` or by unchecking the GUI option.
   - Ambiguous characters (发 as 發 or 髮) keep the original slot for the most common reading; the others use spare slots taken from unused Korean Hangul codes.
   - Anything that cannot be handled keeps its Simplified glyph and is listed in the report.
 

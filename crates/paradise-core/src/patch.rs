@@ -18,6 +18,8 @@ pub struct PatchOptions {
     pub variant: Variant,
     pub font: FontChoice,
     pub runtime_language: bool,
+    /// Redraw characters shared by Simplified and Traditional in the chosen font.
+    pub redraw_shared: bool,
     pub mapping: Option<Mapping>,
 }
 
@@ -27,6 +29,7 @@ impl Default for PatchOptions {
             variant: Variant::default(),
             font: FontChoice::default(),
             runtime_language: true,
+            redraw_shared: true,
             mapping: None,
         }
     }
@@ -137,6 +140,7 @@ pub fn patch(rom: &Rom, opts: &PatchOptions, progress: &mut dyn FnMut(&str)) -> 
             pack,
             zh,
             others: &others,
+            restyle_shared: opts.redraw_shared,
         },
         &conv,
     );

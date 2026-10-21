@@ -95,6 +95,9 @@ enum Command {
         /// Do not add the Language entry to the Settings menu
         #[arg(long)]
         no_runtime_language: bool,
+        /// Keep the game's own glyphs for characters shared by Simplified and Traditional
+        #[arg(long)]
+        keep_shared_glyphs: bool,
         /// Run the conversion and report without writing the ROM
         #[arg(long)]
         dry_run: bool,
@@ -167,6 +170,7 @@ struct PatchArgs {
     font: FontArg,
     mapping: Option<PathBuf>,
     runtime_language: bool,
+    redraw_shared: bool,
     dry_run: bool,
     force: bool,
 }
@@ -178,6 +182,7 @@ fn do_patch(rom_path: &Path, args: PatchArgs) -> Result<()> {
         font,
         mapping,
         runtime_language,
+        redraw_shared,
         dry_run,
         force,
     } = args;
@@ -198,6 +203,7 @@ fn do_patch(rom_path: &Path, args: PatchArgs) -> Result<()> {
         variant: variant.into(),
         font: font.into(),
         runtime_language,
+        redraw_shared,
         mapping: mapping.as_deref().map(read_mapping).transpose()?,
     };
     let result = patch(&rom, &opts, &mut |m| eprintln!("- {m}"))?;
@@ -209,7 +215,14 @@ fn do_patch(rom_path: &Path, args: PatchArgs) -> Result<()> {
     println!("Characters converted: {}", r.stats.chars_converted);
     println!("Existing glyphs reused: {}", r.stats.reused_codes);
     println!("Glyph slots reskinned:  {}", r.stats.reskinned);
+    println!("Shared glyphs restyled: {}", r.stats.restyled);
     println!("Overflow glyph slots:   {}", r.stats.overflow);
+    if r.stats.restyle_skipped > 0 {
+        println!(
+            "Shared glyphs kept in the game's style (no spare slot): {}",
+            r.stats.restyle_skipped
+        );
+    }
     println!("Glyph font:             {}", opts.font.label());
     if r.fallback_glyphs > 0 {
         println!(
@@ -350,6 +363,7 @@ fn main() -> Result<()> {
             font,
             mapping,
             no_runtime_language,
+            keep_shared_glyphs,
             dry_run,
             force,
         } => do_patch(
@@ -360,6 +374,7 @@ fn main() -> Result<()> {
                 font,
                 mapping,
                 runtime_language: !no_runtime_language,
+                redraw_shared: !keep_shared_glyphs,
                 dry_run,
                 force,
             },
