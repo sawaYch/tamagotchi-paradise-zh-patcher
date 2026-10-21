@@ -3,8 +3,9 @@
 https://github.com/user-attachments/assets/d334540c-14fb-4485-b4cc-196fc8aa19d5
 
 Converts the Simplified Chinese text and font in your own Tamagotchi Paradise ROM (`.bin`) to Traditional Chinese (Hong Kong by default) and writes a new ROM. No ROM or firmware is included or distributed; you supply your own dump.
-
 The original file is never modified.
+
+You can use the web version (wasm) here: https://paradise-zh-patcher.void-dojo.workers.dev/ or desktop app.
 
 ## What it does
 
@@ -78,7 +79,7 @@ Binaries are placed in `target/release/`: `paradise-gui` and `paradise-cli`.
 
 ## GUI
 
-Run `target/release/paradise-gui`.
+Run `target/release/paradise-gui` OR visit https://paradise-zh-patcher.void-dojo.workers.dev/
 ![preview-gui](./docs/gui-demo.png)
 
 ## Guide to Flash patched ROM ✨
@@ -98,6 +99,29 @@ flowchart TD
 3. Open the ROM `.bin` dumped by Paramix Studio or bbamorachi in the ZH patcher.
 4. Save the patched ROM under a new name, for example `paradise-glacier-zh.bin`.
 5. Flash the patched ROM back to the device with Paramix Studio or bbamorachi.
+
+## Web version (WebAssembly on Cloudflare Workers)
+
+The GUI also builds to WebAssembly, so the patcher can run in a web page. The ROM is read and patched inside the browser and is never uploaded; the patched ROM is downloaded from the page.
+
+Requires Node.js, the `wasm32-unknown-unknown` Rust target and `wasm-bindgen-cli` matching the `wasm-bindgen` version in `Cargo.lock`:
+
+```
+rustup target add wasm32-unknown-unknown
+cargo install wasm-bindgen-cli --version <version in Cargo.lock> --locked
+cd web
+npm install
+npm run dev      # builds, then serves http://localhost:8787 with wrangler
+npm run deploy   # builds, then publishes to Cloudflare Workers
+```
+
+The Worker (`web/wrangler.jsonc`) only serves the built files from `web/dist` as static assets; there is no server-side code. Pushing a `v*` tag also deploys through `.github/workflows/deploy-web.yml`, which needs the repository secrets `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`. To embed the page in another site, use an iframe:
+
+```html
+<iframe src="https://paradise-zh-patcher.<your-subdomain>.workers.dev" width="100%" height="900" style="border:0"></iframe>
+```
+
+Differences from the desktop app: the patch runs on the page's main thread, so the page pauses for a few seconds while working; the output is a browser download with a name you choose; and Chinese text in the report lists (unmatched mapping keys, unconverted characters) is shown as `U+XXXX` code points because the page has no CJK font. The WebAssembly file is about 13 MB, which the browser downloads once per update.
 
 ---
 

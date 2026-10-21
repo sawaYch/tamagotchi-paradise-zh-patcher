@@ -3,9 +3,11 @@
     windows_subsystem = "windows"
 )]
 
+mod platform;
+
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
-use std::sync::mpsc::{channel, Receiver};
+use std::path::PathBuf;
+use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 
 use anyhow::{Context as _, Result};
@@ -17,11 +19,14 @@ use paradise_core::mapping::{export_template, Mapping};
 use paradise_core::patch::{changed_glyphs, patch, PatchOptions, PatchReport, RuntimeLanguage};
 use paradise_core::preview::{affected_ids, render_comparison, Image};
 use paradise_core::rom::{Rom, RomInfo};
+use platform::{show_text, Picked, Slot};
 
 const PREVIEW_LIMIT: usize = 60;
 const PREVIEW_WIDTH: usize = 480;
+#[cfg(not(target_arch = "wasm32"))]
 const WINDOW_WIDTH: f32 = 1100.0;
 
+#[cfg(not(target_arch = "wasm32"))]
 const CJK_FONT_CANDIDATES: &[&str] = &[
     r"C:\Windows\Fonts\msjh.ttc",
     r"C:\Windows\Fonts\msyh.ttc",
@@ -33,6 +38,7 @@ const CJK_FONT_CANDIDATES: &[&str] = &[
     "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc",
 ];
 
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 enum Msg {
     Log(String),
     Done(Result<Box<Finished>, String>),
@@ -41,12 +47,30 @@ enum Msg {
 struct Finished {
     report: PatchReport,
     preview: Option<Image>,
-    written: Option<PathBuf>,
+    written: Option<String>,
 }
 
 struct LoadedRom {
-    path: PathBuf,
+    name: String,
+    path: Option<PathBuf>,
+    bytes: Arc<Vec<u8>>,
     info: RomInfo,
+}
+
+struct MappingFile {
+    name: String,
+    text: String,
+}
+
+struct Job {
+    bytes: Arc<Vec<u8>>,
+    input_path: Option<PathBuf>,
+    mapping_text: Option<String>,
+    variant: Variant,
+    font: FontChoice,
+    runtime_language: bool,
+    dry_run: bool,
+    output: String,
 }
 
 struct App {
@@ -55,17 +79,22 @@ struct App {
     output: String,
     variant: Variant,
     font: FontChoice,
-    mapping_path: String,
+    mapping: Option<MappingFile>,
     runtime_language: bool,
     dry_run: bool,
     log: Vec<String>,
     rx: Option<Receiver<Msg>>,
+    pending: Option<Job>,
+    pending_frames: u8,
+    pick_tx: Sender<Picked>,
+    pick_rx: Receiver<Picked>,
     report: Option<PatchReport>,
-    written: Option<PathBuf>,
+    written: Option<String>,
     preview: Option<egui::TextureHandle>,
     error: Option<String>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn install_cjk_font(ctx: &egui::Context) {
     for path in CJK_FONT_CANDIDATES {
         if let Ok(bytes) = std::fs::read(path) {
@@ -84,31 +113,85 @@ fn install_cjk_font(ctx: &egui::Context) {
     }
 }
 
-fn default_output(input: &Path) -> String {
-    let stem = input.file_stem().and_then(|s| s.to_str()).unwrap_or("rom");
-    input
-        .with_file_name(format!("{stem}_zh-hk.bin"))
-        .display()
-        .to_string()
+fn default_output(name: &str, dir: Option<&std::path::Path>) -> String {
+    let stem = std::path::Path::new(name)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("rom");
+    let file = format!("{stem}_zh-hk.bin");
+    match dir {
+        Some(d) => d.join(file).display().to_string(),
+        None => file,
+    }
 }
 
-fn variant_label(v: Variant) -> &'static str {
-    v.label()
+fn run_job(job: &Job, log: &mut dyn FnMut(String)) -> Result<Finished> {
+    if !job.dry_run {
+        if job.output.trim().is_empty() {
+            anyhow::bail!("choose an output file");
+        }
+        if let Some(input) = &job.input_path {
+            if std::path::Path::new(job.output.trim()) == input.as_path() {
+                anyhow::bail!("the output file must differ from the input ROM");
+            }
+        }
+    }
+    let rom = Rom::load(job.bytes.to_vec())?;
+    let mapping = match &job.mapping_text {
+        Some(text) => Some(Mapping::parse(text.trim_start_matches('\u{feff}'))?),
+        None => None,
+    };
+    let opts = PatchOptions {
+        variant: job.variant,
+        font: job.font,
+        runtime_language: job.runtime_language,
+        mapping,
+    };
+    let result = patch(&rom, &opts, &mut |m| log(m.to_string()))?;
+    let after = Rom::load(result.bytes.clone())?;
+    let changed: HashSet<usize> = changed_glyphs(&rom, &after)?.into_iter().collect();
+    let (ta, tb) = (
+        rom.table(rom.info().zh_table)?,
+        after.table(after.info().zh_table)?,
+    );
+    let mut ids = affected_ids(&ta, &tb, &changed);
+    ids.truncate(PREVIEW_LIMIT);
+    let preview = render_comparison(
+        (&rom.font()?, &ta),
+        (&after.font()?, &tb),
+        &ids,
+        PREVIEW_WIDTH,
+    );
+    let written = if job.dry_run {
+        None
+    } else {
+        Some(platform::save(job.output.trim(), &result.bytes)?)
+    };
+    Ok(Finished {
+        report: result.report,
+        preview: Some(preview),
+        written,
+    })
 }
 
 impl App {
     fn new() -> App {
+        let (pick_tx, pick_rx) = channel();
         App {
             loaded: None,
             load_error: None,
             output: String::new(),
             variant: Variant::HongKong,
             font: FontChoice::default(),
-            mapping_path: String::new(),
+            mapping: None,
             runtime_language: true,
             dry_run: false,
             log: Vec::new(),
             rx: None,
+            pending: None,
+            pending_frames: 0,
+            pick_tx,
+            pick_rx,
             report: None,
             written: None,
             preview: None,
@@ -116,21 +199,61 @@ impl App {
         }
     }
 
-    fn load(&mut self, path: PathBuf) {
+    fn busy(&self) -> bool {
+        self.rx.is_some() || self.pending.is_some()
+    }
+
+    fn pick(&self, ctx: &egui::Context, slot: Slot) {
+        let (label, exts): (&str, &[&str]) = match slot {
+            Slot::Rom => ("ROM", &["bin", "rom"]),
+            Slot::Mapping => ("JSON", &["json"]),
+        };
+        platform::pick(ctx, slot, label, exts, &self.pick_tx);
+    }
+
+    fn accept(&mut self, picked: Picked) {
+        match picked.slot {
+            Slot::Rom => self.load(picked.name, picked.path, picked.bytes),
+            Slot::Mapping => {
+                let result = picked.bytes.and_then(|b| {
+                    let text = String::from_utf8(b).map_err(|e| e.to_string())?;
+                    Mapping::parse(text.trim_start_matches('\u{feff}'))
+                        .map_err(|e| format!("{e}"))?;
+                    Ok(text)
+                });
+                match result {
+                    Ok(text) => {
+                        self.mapping = Some(MappingFile {
+                            name: picked.name,
+                            text,
+                        });
+                        self.error = None;
+                    }
+                    Err(e) => self.error = Some(format!("mapping file: {e}")),
+                }
+            }
+        }
+    }
+
+    fn load(&mut self, name: String, path: Option<PathBuf>, bytes: Result<Vec<u8>, String>) {
         self.report = None;
         self.preview = None;
         self.written = None;
         self.error = None;
         self.log.clear();
-        let result = std::fs::read(&path)
-            .with_context(|| format!("reading {}", path.display()))
-            .and_then(|b| Rom::load(b).map_err(anyhow::Error::from));
+        let result = bytes.map_err(anyhow::Error::msg).and_then(|b| {
+            Rom::load(b.clone())
+                .map(|r| (b, r))
+                .map_err(anyhow::Error::from)
+        });
         match result {
-            Ok(rom) => {
-                self.output = default_output(&path);
+            Ok((bytes, rom)) => {
+                self.output = default_output(&name, path.as_deref().and_then(|p| p.parent()));
                 self.loaded = Some(LoadedRom {
                     info: rom.info().clone(),
+                    name,
                     path,
+                    bytes: Arc::new(bytes),
                 });
                 self.load_error = None;
             }
@@ -143,147 +266,139 @@ impl App {
 
     fn start(&mut self, ctx: &egui::Context) {
         let Some(loaded) = &self.loaded else { return };
-        let input = loaded.path.clone();
-        let output = PathBuf::from(self.output.trim());
-        let dry_run = self.dry_run;
-        let variant = self.variant;
-        let font = self.font;
-        let mapping_path = self.mapping_path.trim().to_string();
-        let runtime_language = self.runtime_language;
-        let (tx, rx) = channel();
-        self.rx = Some(rx);
+        let job = Job {
+            bytes: loaded.bytes.clone(),
+            input_path: loaded.path.clone(),
+            mapping_text: self.mapping.as_ref().map(|m| m.text.clone()),
+            variant: self.variant,
+            font: self.font,
+            runtime_language: self.runtime_language,
+            dry_run: self.dry_run,
+            output: self.output.clone(),
+        };
         self.report = None;
         self.preview = None;
         self.written = None;
         self.error = None;
         self.log.clear();
+        self.dispatch(ctx, job);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn dispatch(&mut self, ctx: &egui::Context, job: Job) {
+        let (tx, rx) = channel();
+        self.rx = Some(rx);
         let ctx = ctx.clone();
         std::thread::spawn(move || {
             let send = |m: Msg| {
                 let _ = tx.send(m);
                 ctx.request_repaint();
             };
-            let run = || -> Result<Finished> {
-                if !dry_run {
-                    if output == input {
-                        anyhow::bail!("the output file must differ from the input ROM");
-                    }
-                    if output.as_os_str().is_empty() {
-                        anyhow::bail!("choose an output file");
-                    }
-                }
-                let bytes = std::fs::read(&input)?;
-                let rom = Rom::load(bytes)?;
-                let mapping = if mapping_path.is_empty() {
-                    None
-                } else {
-                    let text = std::fs::read_to_string(&mapping_path)
-                        .with_context(|| format!("reading {mapping_path}"))?;
-                    Some(Mapping::parse(text.trim_start_matches('\u{feff}'))?)
-                };
-                let opts = PatchOptions {
-                    variant,
-                    font,
-                    runtime_language,
-                    mapping,
-                };
-                let result = patch(&rom, &opts, &mut |m| send(Msg::Log(m.to_string())))?;
-                let after = Rom::load(result.bytes.clone())?;
-                let changed: HashSet<usize> = changed_glyphs(&rom, &after)?.into_iter().collect();
-                let (ta, tb) = (
-                    rom.table(rom.info().zh_table)?,
-                    after.table(after.info().zh_table)?,
-                );
-                let mut ids = affected_ids(&ta, &tb, &changed);
-                ids.truncate(PREVIEW_LIMIT);
-                let preview = render_comparison(
-                    (&rom.font()?, &ta),
-                    (&after.font()?, &tb),
-                    &ids,
-                    PREVIEW_WIDTH,
-                );
-                let mut written = None;
-                if !dry_run {
-                    std::fs::write(&output, &result.bytes)
-                        .with_context(|| format!("writing {}", output.display()))?;
-                    written = Some(output.clone());
-                }
-                Ok(Finished {
-                    report: result.report,
-                    preview: Some(preview),
-                    written,
-                })
-            };
-            send(Msg::Done(run().map(Box::new).map_err(|e| format!("{e:#}"))));
+            let res = run_job(&job, &mut |m| send(Msg::Log(m)));
+            send(Msg::Done(res.map(Box::new).map_err(|e| format!("{e:#}"))));
         });
     }
 
-    fn export_mapping(&mut self, path: &Path) -> Result<()> {
+    #[cfg(target_arch = "wasm32")]
+    fn dispatch(&mut self, ctx: &egui::Context, job: Job) {
+        self.pending = Some(job);
+        self.pending_frames = 0;
+        ctx.request_repaint();
+    }
+
+    /// The browser has no threads here, so the job runs on the UI thread one frame
+    /// after the click, letting the "working" state paint first.
+    fn run_pending(&mut self, ctx: &egui::Context) {
+        if self.pending.is_none() {
+            return;
+        }
+        if self.pending_frames < 2 {
+            self.pending_frames += 1;
+            ctx.request_repaint();
+            return;
+        }
+        let Some(job) = self.pending.take() else {
+            return;
+        };
+        let mut logs = Vec::new();
+        let res = run_job(&job, &mut |m| logs.push(m));
+        self.log.extend(logs);
+        self.finish(ctx, res.map(Box::new).map_err(|e| format!("{e:#}")));
+    }
+
+    fn export_mapping(&mut self, target: &str) -> Result<()> {
         let loaded = self.loaded.as_ref().context("no ROM loaded")?;
-        let bytes = std::fs::read(&loaded.path)
-            .with_context(|| format!("reading {}", loaded.path.display()))?;
-        let rom = Rom::load(bytes)?;
+        let rom = Rom::load(loaded.bytes.to_vec())?;
         let cs = Charset::standard();
         let table = rom.table(rom.info().zh_table)?;
         let conv = Converter::with_mapping(self.variant, Mapping::default(), &cs)?;
-        std::fs::write(path, export_template(&table, &cs, &conv))
-            .with_context(|| format!("writing {}", path.display()))?;
+        let text = export_template(&table, &cs, &conv);
+        let saved = platform::save(target, text.as_bytes())?;
+        self.log.push(format!("Exported strings to {saved}"));
+        self.mapping = Some(MappingFile { name: saved, text });
         Ok(())
     }
 
-    fn poll(&mut self, ctx: &egui::Context) {
-        let Some(rx) = &self.rx else { return };
-        let mut finished = false;
-        while let Ok(msg) = rx.try_recv() {
-            match msg {
-                Msg::Log(m) => self.log.push(m),
-                Msg::Done(res) => {
-                    finished = true;
-                    match res {
-                        Ok(f) => {
-                            self.log.push(if f.written.is_some() {
-                                "Done".into()
-                            } else {
-                                "Dry run finished".into()
-                            });
-                            self.report = Some(f.report);
-                            self.written = f.written;
-                            if let Some(img) = f.preview {
-                                let ci = egui::ColorImage::from_rgba_unmultiplied(
-                                    [img.width, img.height],
-                                    &img.rgba,
-                                );
-                                self.preview = Some(ctx.load_texture(
-                                    "preview",
-                                    ci,
-                                    egui::TextureOptions::NEAREST,
-                                ));
-                            }
-                        }
-                        Err(e) => self.error = Some(e),
-                    }
+    fn finish(&mut self, ctx: &egui::Context, res: Result<Box<Finished>, String>) {
+        match res {
+            Ok(f) => {
+                self.log.push(if f.written.is_some() {
+                    "Done".into()
+                } else {
+                    "Dry run finished".into()
+                });
+                self.report = Some(f.report);
+                self.written = f.written;
+                if let Some(img) = f.preview {
+                    let ci = egui::ColorImage::from_rgba_unmultiplied(
+                        [img.width, img.height],
+                        &img.rgba,
+                    );
+                    self.preview =
+                        Some(ctx.load_texture("preview", ci, egui::TextureOptions::NEAREST));
                 }
             }
-        }
-        if finished {
-            self.rx = None;
+            Err(e) => self.error = Some(e),
         }
     }
 
-    fn rom_section(&mut self, ui: &mut egui::Ui) {
+    fn poll(&mut self, ctx: &egui::Context) {
+        while let Ok(picked) = self.pick_rx.try_recv() {
+            self.accept(picked);
+        }
+        self.run_pending(ctx);
+        let Some(rx) = &self.rx else { return };
+        let mut done = None;
+        while let Ok(msg) = rx.try_recv() {
+            match msg {
+                Msg::Log(m) => self.log.push(m),
+                Msg::Done(res) => done = Some(res),
+            }
+        }
+        if let Some(res) = done {
+            self.rx = None;
+            self.finish(ctx, res);
+        }
+    }
+
+    fn rom_section(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         ui.heading("1. Your ROM");
-        ui.label("Use your own Tamagotchi Paradise \"Glacier\" ROM (.bin). Drop a file here or browse. The original file is never modified.");
+        ui.label(if platform::IS_WEB {
+            "Use your own Tamagotchi Paradise \"Glacier\" ROM (.bin). Drop a file here or browse. The ROM is processed inside your browser and is never uploaded."
+        } else {
+            "Use your own Tamagotchi Paradise \"Glacier\" ROM (.bin). Drop a file here or browse. The original file is never modified."
+        });
         ui.horizontal_wrapped(|ui| {
             if ui.button("Browse...").clicked() {
-                if let Some(p) = rfd::FileDialog::new()
-                    .add_filter("ROM", &["bin", "rom"])
-                    .pick_file()
-                {
-                    self.load(p);
-                }
+                self.pick(ctx, Slot::Rom);
             }
             if let Some(l) = &self.loaded {
-                ui.monospace(l.path.display().to_string());
+                let shown = l
+                    .path
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| l.name.clone());
+                ui.monospace(shown);
             }
         });
         if let Some(e) = &self.load_error {
@@ -330,14 +445,14 @@ impl App {
 
     fn options_section(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         ui.heading("2. Convert");
-        let busy = self.rx.is_some();
+        let busy = self.busy();
         egui::Grid::new("opts").num_columns(2).show(ui, |ui| {
             ui.label("Target");
             egui::ComboBox::from_id_salt("variant")
-                .selected_text(variant_label(self.variant))
+                .selected_text(self.variant.label())
                 .show_ui(ui, |ui| {
                     for v in [Variant::HongKong, Variant::Taiwan, Variant::Standard] {
-                        ui.selectable_value(&mut self.variant, v, variant_label(v));
+                        ui.selectable_value(&mut self.variant, v, v.label());
                     }
                 });
             ui.end_row();
@@ -355,17 +470,18 @@ impl App {
             ui.end_row();
             ui.label("Text mapping (JSON)");
             ui.horizontal_wrapped(|ui| {
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.mapping_path)
-                        .hint_text("optional, e.g. { \"^信息$\": \"資訊\"}")
-                        .desired_width(380.0),
-                );
                 if ui.button("Browse...").clicked() {
-                    if let Some(p) = rfd::FileDialog::new()
-                        .add_filter("JSON", &["json"])
-                        .pick_file()
-                    {
-                        self.mapping_path = p.display().to_string();
+                    self.pick(ctx, Slot::Mapping);
+                }
+                match &self.mapping {
+                    Some(m) => {
+                        ui.monospace(&m.name);
+                        if ui.button("Clear").clicked() {
+                            self.mapping = None;
+                        }
+                    }
+                    None => {
+                        ui.weak("none (optional)");
                     }
                 }
                 let can_export = self.loaded.is_some() && !busy;
@@ -376,35 +492,27 @@ impl App {
                     )
                     .clicked()
                 {
-                    if let Some(p) = rfd::FileDialog::new()
-                        .add_filter("JSON", &["json"])
-                        .set_file_name("mapping.json")
-                        .save_file()
+                    if let Some(target) =
+                        platform::ask_save_target("mapping.json", "JSON", &["json"])
                     {
-                        match self.export_mapping(&p) {
-                            Ok(()) => {
-                                self.log
-                                    .push(format!("Exported strings to {}", p.display()));
-                                self.mapping_path = p.display().to_string();
-                                self.error = None;
-                            }
+                        match self.export_mapping(&target) {
+                            Ok(()) => self.error = None,
                             Err(e) => self.error = Some(format!("{e:#}")),
                         }
                     }
                 }
             });
             ui.end_row();
-            ui.label("Output file");
+            ui.label(if platform::IS_WEB {
+                "Download file name"
+            } else {
+                "Output file"
+            });
             ui.horizontal_wrapped(|ui| {
                 ui.add(egui::TextEdit::singleline(&mut self.output).desired_width(380.0));
-                if ui.button("Browse...").clicked() {
-                    let mut d = rfd::FileDialog::new().add_filter("ROM", &["bin"]);
-                    if let Some(name) = Path::new(&self.output).file_name().and_then(|n| n.to_str())
-                    {
-                        d = d.set_file_name(name);
-                    }
-                    if let Some(p) = d.save_file() {
-                        self.output = p.display().to_string();
+                if platform::CAN_BROWSE_OUTPUT && ui.button("Browse...").clicked() {
+                    if let Some(p) = platform::ask_save_target(&self.output, "ROM", &["bin"]) {
+                        self.output = p;
                     }
                 }
             });
@@ -420,21 +528,19 @@ impl App {
         );
         ui.horizontal_wrapped(|ui| {
             let can_run = self.loaded.is_some() && !busy;
-            if ui
-                .add_enabled(
-                    can_run,
-                    egui::Button::new(if self.dry_run {
-                        "Run dry run"
-                    } else {
-                        "Create patched ROM"
-                    }),
-                )
-                .clicked()
-            {
+            let label = match (self.dry_run, platform::IS_WEB) {
+                (true, _) => "Run dry run",
+                (false, true) => "Create and download patched ROM",
+                (false, false) => "Create patched ROM",
+            };
+            if ui.add_enabled(can_run, egui::Button::new(label)).clicked() {
                 self.start(ctx);
             }
             if busy {
                 ui.spinner();
+                if self.pending.is_some() {
+                    ui.label("Working... the page may pause for a few seconds.");
+                }
             }
         });
         if !self.log.is_empty() {
@@ -464,7 +570,12 @@ impl App {
 
     fn result_details(&self, ui: &mut egui::Ui, r: &PatchReport) {
         if let Some(p) = &self.written {
-            ui.colored_label(egui::Color32::LIGHT_GREEN, format!("Saved {}", p.display()));
+            let verb = if platform::IS_WEB {
+                "Downloaded"
+            } else {
+                "Saved"
+            };
+            ui.colored_label(egui::Color32::LIGHT_GREEN, format!("{verb} {p}"));
         } else {
             ui.label("Dry run: nothing was written.");
         }
@@ -519,11 +630,11 @@ impl App {
             );
             ui.end_row();
         });
-        let unused: Vec<&str> = r
+        let unused: Vec<String> = r
             .mapping_hits
             .iter()
             .filter(|(_, n)| *n == 0)
-            .map(|(k, _)| k.as_str())
+            .map(|(k, _)| show_text(k))
             .collect();
         if !unused.is_empty() {
             ui.colored_label(
@@ -537,17 +648,17 @@ impl App {
         if !r.unresolved.is_empty() {
             ui.colored_label(egui::Color32::YELLOW, "Could not convert:");
             for u in &r.unresolved {
-                ui.label(format!(
+                ui.label(show_text(&format!(
                     "{} -> {} x{} ({})",
                     u.source, u.target, u.count, u.reason
-                ));
+                )));
             }
         }
         if !r.remaining_simplified.is_empty() {
             let list: String = r.remaining_simplified.iter().map(|(c, _)| *c).collect();
             ui.colored_label(
                 egui::Color32::YELLOW,
-                format!("Simplified characters left: {list}"),
+                format!("Simplified characters left: {}", show_text(&list)),
             );
         }
     }
@@ -574,10 +685,10 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.poll(&ctx);
-        let dropped = ctx.input(|i| i.raw.dropped_files.first().map(|f| f.path().to_path_buf()));
-        if let Some(p) = dropped {
-            if self.rx.is_none() {
-                self.load(p);
+        let dropped = ctx.input(|i| i.raw.dropped_files.first().cloned());
+        if let Some(file) = dropped {
+            if !self.busy() {
+                platform::load_dropped(&ctx, file, &self.pick_tx);
             }
         }
         egui::CentralPanel::default().show(ui, |ui| {
@@ -585,7 +696,7 @@ impl eframe::App for App {
                 ui.heading("Tamagotchi Paradise: Simplified to Traditional Chinese");
                 ui.label("Converts the Simplified Chinese text and font in your own ROM. Keep a backup of the original ROM.");
                 ui.separator();
-                self.rom_section(ui);
+                self.rom_section(ui, &ctx);
                 ui.separator();
                 self.options_section(ui, &ctx);
                 ui.separator();
@@ -595,6 +706,7 @@ impl eframe::App for App {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -609,11 +721,43 @@ fn main() -> eframe::Result {
         options,
         Box::new(|cc| {
             install_cjk_font(&cc.egui_ctx);
-            let mut app = App::new();
+            let app = App::new();
             if let Some(p) = std::env::args_os().nth(1) {
-                app.load(PathBuf::from(p));
+                platform::send_path(&cc.egui_ctx, Slot::Rom, PathBuf::from(p), &app.pick_tx);
             }
             Ok(Box::new(app))
         }),
     )
+}
+
+#[cfg(target_arch = "wasm32")]
+fn main() {
+    use wasm_bindgen::JsCast as _;
+
+    wasm_bindgen_futures::spawn_local(async {
+        let document = web_sys::window()
+            .and_then(|w| w.document())
+            .expect("no document");
+        let canvas = document
+            .get_element_by_id("paradise_canvas")
+            .expect("canvas #paradise_canvas not found")
+            .dyn_into::<web_sys::HtmlCanvasElement>()
+            .expect("#paradise_canvas is not a canvas");
+        let started = eframe::WebRunner::new()
+            .start(
+                canvas,
+                eframe::WebOptions::default(),
+                Box::new(|_cc| Ok(Box::new(App::new()))),
+            )
+            .await;
+        if let Some(loading) = document.get_element_by_id("loading") {
+            match started {
+                Ok(()) => loading.remove(),
+                Err(e) => loading.set_inner_html(&format!(
+                    "The app could not start in this browser: {}",
+                    e.as_string().unwrap_or_else(|| "unknown error".into())
+                )),
+            }
+        }
+    });
 }

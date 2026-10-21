@@ -1,3 +1,10 @@
 /target
 *.bin
 *.rom
+
+/web/dist/
+/web/node_modules/
+/web/.wrangler/
+/web/.dev.vars*
+/web/.env*
+npm-debug.log*
