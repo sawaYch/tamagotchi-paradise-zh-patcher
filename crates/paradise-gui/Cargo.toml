@@ -14,6 +14,9 @@ paradise-core = { path = "../paradise-core" }
 anyhow.workspace = true
 eframe = "0.37"
 
+[build-dependencies]
+winresource = "0.1"
+
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 rfd = "0.17"
 

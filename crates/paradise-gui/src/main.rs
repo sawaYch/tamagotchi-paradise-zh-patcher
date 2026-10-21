@@ -717,12 +717,16 @@ impl eframe::App for App {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn main() -> eframe::Result {
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_inner_size([WINDOW_WIDTH, 900.0])
+        .with_min_inner_size([WINDOW_WIDTH, 480.0])
+        .with_max_inner_size([WINDOW_WIDTH, 4000.0])
+        .with_drag_and_drop(true);
+    if let Ok(icon) = eframe::icon_data::from_png_bytes(include_bytes!("../icon.png")) {
+        viewport = viewport.with_icon(icon);
+    }
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([WINDOW_WIDTH, 900.0])
-            .with_min_inner_size([WINDOW_WIDTH, 480.0])
-            .with_max_inner_size([WINDOW_WIDTH, 4000.0])
-            .with_drag_and_drop(true),
+        viewport,
         ..Default::default()
     };
     eframe::run_native(

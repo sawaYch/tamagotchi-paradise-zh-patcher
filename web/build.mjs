@@ -49,4 +49,5 @@ run("wasm-bindgen", [
 for (const f of ["index.html", "_headers"]) {
   cpSync(join(web, f), join(dist, f));
 }
+cpSync(join(root, "crates", "paradise-gui", "icon.png"), join(dist, "icon.png"));
 console.log(`Built ${dist}`);
