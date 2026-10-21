@@ -1,8 +1,6 @@
 # Tamagotchi Paradise: Traditional Chinese ROM Patcher 繁體中文 Patcher
 
-<videocontrols>
-<sourcesrc="./docs/demo1.mp4"type="video/mp4">
-</video>
+https://github.com/user-attachments/assets/d334540c-14fb-4485-b4cc-196fc8aa19d5
 
 Converts the Simplified Chinese text and font in your own Tamagotchi Paradise ROM (`.bin`) to Traditional Chinese (Hong Kong by default) and writes a new ROM. No ROM or firmware is included or distributed; you supply your own dump.
 
@@ -41,7 +39,7 @@ All three convert characters only; none rewrites vocabulary (软件 stays 軟件
 
 户 and 温, which OpenCC leaves unchanged, are always fixed to 戶 and 溫. To compare variants, export each with `paradise-cli strings <rom> --export x.json --variant <hk|tw|standard>`.
 
-## Custom text mapping .json - Provide your own translation yourself (optional)
+## Custom text mapping .json - Provide your own translation mapping (optional)
 
 ![custom-mapping](./docs/preview.jpg)
 
@@ -57,9 +55,8 @@ Nothing is hardcoded per string. To override wording, pass a JSON file of replac
 
 ## Changing the language on Tamagotchi Paradise in runtime
 
-<videocontrols>
-<sourcesrc="./docs/demo2.mp4"type="video/mp4">
-</video>
+https://github.com/user-attachments/assets/6a458ff1-11af-445e-888a-6f51d9bf7949
+
 
 The firmware only offers the language screen on first boot. The patcher adds a "Language" entry (語言) as the fourth item of the Settings menu. Choosing a language there applies it immediately and returns to Settings, without repeating the first-boot date, birthday and planet-name screens. The Chinese entry in the language list is renamed from 中文（简体） to 中文（繁體）.
 
@@ -84,6 +81,23 @@ Binaries are placed in `target/release/`: `paradise-gui` and `paradise-cli`.
 Run `target/release/paradise-gui`.
 ![preview-gui](./docs/gui-demo.png)
 
+## Guide to Flash patched ROM ✨
+
+```mermaid
+flowchart TD
+    A([Start]) --> B["1. Full backup with bbamorachi flasher<br/>(entire ROM + save progress in one .bin)"]
+    B --> C["2. Paramix Studio:<br/>'Back up save' and 'Read ROM'"]
+    C --> D["3. Open the ROM .bin dumped by<br/>Paramix Studio / bbamorachi in the ZH patcher"]
+    D --> E["4. Save the patched ROM with a new name<br/>e.g. paradise-glacier-zh.bin"]
+    E --> F["5. Flash paradise-glacier-zh.bin back to the device<br/>with Paramix Studio / bbamorachi"]
+    F --> G([Done: Traditional Chinese on your Tamagotchi Paradise])
+```
+
+1. Use [bbamorachi flasher](https://tools.bbamorachi.us/flasher) to make a full backup of your Tamagotchi Paradise first. It backs up the entire ROM and your save progress in a single `.bin` file.
+2. Use [Paramix Studio](https://mameise.github.io/Paramix-Studio/) to back up your game save ("Back up save" button) and dump the ROM ("Read ROM" button).
+3. Open the ROM `.bin` dumped by Paramix Studio or bbamorachi in the ZH patcher.
+4. Save the patched ROM under a new name, for example `paradise-glacier-zh.bin`.
+5. Flash the patched ROM back to the device with Paramix Studio or bbamorachi.
 
 ---
 
