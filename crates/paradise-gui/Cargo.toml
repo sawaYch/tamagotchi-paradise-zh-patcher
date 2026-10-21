@@ -1,0 +1,16 @@
+[package]
+name = "paradise-gui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "paradise-gui"
+path = "src/main.rs"
+
+[dependencies]
+paradise-core = { path = "../paradise-core" }
+anyhow.workspace = true
+eframe = "0.37"
+rfd = "0.17"

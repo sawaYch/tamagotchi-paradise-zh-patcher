@@ -1,0 +1,12 @@
+[package]
+name = "paradise-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+encoding_rs.workspace = true
+png.workspace = true
+ferrous-opencc = { version = "0.4", default-features = false, features = ["s2t-conversion"] }
+serde_json = "1"
