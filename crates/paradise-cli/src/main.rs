@@ -261,7 +261,7 @@ fn runtime_language_label(r: RuntimeLanguage) -> &'static str {
         RuntimeLanguage::Disabled => "not requested",
         RuntimeLanguage::Added => "added (experimental)",
         RuntimeLanguage::AlreadyPresent => "already present",
-        RuntimeLanguage::Unsupported => "skipped: firmware does not match the known Glacier build",
+        RuntimeLanguage::Unsupported => "skipped: firmware does not match a known build",
     }
 }
 

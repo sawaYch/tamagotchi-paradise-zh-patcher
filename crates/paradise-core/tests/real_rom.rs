@@ -84,12 +84,13 @@ fn runtime_language_patch_is_detected_and_applied_once() {
         second.report.runtime_language,
         RuntimeLanguage::AlreadyPresent
     );
-    assert_eq!(again.all_tables().unwrap()[0].strings.len(), 825);
+    let expected = rom.all_tables().unwrap()[0].strings.len() + 1;
+    assert_eq!(again.all_tables().unwrap()[0].strings.len(), expected);
     assert_eq!(
         Rom::load(second.bytes).unwrap().all_tables().unwrap()[0]
             .strings
             .len(),
-        825
+        expected
     );
 
     let off = PatchOptions {

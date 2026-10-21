@@ -5,15 +5,12 @@
 //! through the live language setting. The patch relocates the Settings menu table into
 //! unused flash, appends the Language entry, and makes the language scene return to the
 //! scene it was opened from (Settings) instead of continuing the first-boot flow.
+//!
+//! Firmware builds differ in code layout and scene numbering, so each known build has a
+//! [`Profile`]. A ROM is only patched when every byte the patch touches matches one.
 
 use crate::charset::Charset;
 use crate::error::{Error, Result};
-
-const SETTINGS_PAGE1_TABLE: usize = 0xA4FFC;
-const SETTINGS_PAGE1_PTR: usize = 0x582CC;
-const SETTINGS_PAGE1_COUNT: usize = 0x582D6;
-const LANGUAGE_NEXT_SCENE: usize = 0x33CFC;
-const SCENE_STATE_PTR: usize = 0x138D6;
 
 const FREE_AT: usize = 0xB6000;
 const FREE_LEN: usize = 0x80;
@@ -22,15 +19,77 @@ const TRAMPOLINE_AT: usize = FREE_AT + 0x40;
 const TABLE_ENTRY_LEN: usize = 12;
 const NEW_ENTRY_AT: usize = TABLE_AT + 3 * TABLE_ENTRY_LEN;
 
-const SCENE_LANGUAGE: u32 = 113;
-const SCENE_SETTINGS: u8 = 55;
-const SCENE_DATETIME: u8 = 114;
-const SCENE_STATE_ADDR: u32 = 0x1800_1CB4;
-
 const FLASH_ALIAS_DELTA: usize = 0x11000;
 const ALIAS_BASE: u32 = 0x1000_0000;
 
-const ORIGINAL_PAGE1: [u32; 9] = [28, 70, 0, 27, 71, 0, 26, 0, 0];
+/// Locations and scene numbers of one firmware build.
+struct Profile {
+    page1_table: usize,
+    page1_original: [u32; 9],
+    page1_ptr: usize,
+    language_next_scene: usize,
+    /// Flash offset the original call branches to (the function or a veneer).
+    set_scene: usize,
+    state_site: usize,
+    state_addr: u32,
+    scene_language: u32,
+    scene_settings: u8,
+    scene_datetime: u8,
+    /// The scene-change function is a plain store the trampoline can inline; otherwise
+    /// the trampoline tail-calls `set_scene`.
+    inline_set_scene: bool,
+}
+
+impl Profile {
+    fn page1_count(&self) -> usize {
+        self.page1_ptr + 10
+    }
+}
+
+const PROFILES: [Profile; 3] = [
+    // Glacier and Tropical
+    Profile {
+        page1_table: 0xA4FFC,
+        page1_original: [28, 70, 0, 27, 71, 0, 26, 0, 0],
+        page1_ptr: 0x582CC,
+        language_next_scene: 0x33CFC,
+        set_scene: 0x138CC,
+        state_site: 0x138D6,
+        state_addr: 0x1800_1CB4,
+        scene_language: 113,
+        scene_settings: 55,
+        scene_datetime: 114,
+        inline_set_scene: true,
+    },
+    // Jade Forest
+    Profile {
+        page1_table: 0x91A68,
+        page1_original: [28, 68, 0, 27, 69, 0, 26, 0, 0],
+        page1_ptr: 0x525E0,
+        language_next_scene: 0x30448,
+        set_scene: 0x8E948,
+        state_site: 0x1CCF6,
+        state_addr: 0x1800_1BF4,
+        scene_language: 109,
+        scene_settings: 54,
+        scene_datetime: 110,
+        inline_set_scene: false,
+    },
+    // Sky, Water and Land
+    Profile {
+        page1_table: 0x8C7F0,
+        page1_original: [28, 67, 0, 27, 68, 0, 26, 0, 0],
+        page1_ptr: 0x5061C,
+        language_next_scene: 0x2F104,
+        set_scene: 0x8A430,
+        state_site: 0x1CA8E,
+        state_addr: 0x1800_1BF4,
+        scene_language: 106,
+        scene_settings: 53,
+        scene_datetime: 107,
+        inline_set_scene: false,
+    },
+];
 
 /// What the ROM's menu code currently looks like.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,17 +113,21 @@ fn movt(rd: u16, imm: u16) -> [u8; 4] {
     pack(hi, lo)
 }
 
-fn bl(from: usize, to: usize) -> [u8; 4] {
-    let off = to as i64 - (from as i64 + 4);
-    let off = off as u32;
+fn branch(from: usize, to: usize, link: bool) -> [u8; 4] {
+    let off = (to as i64 - (from as i64 + 4)) as u32;
     let s = (off >> 24) & 1;
     let i1 = (off >> 23) & 1;
     let i2 = (off >> 22) & 1;
     let j1 = !(i1 ^ s) & 1;
     let j2 = !(i2 ^ s) & 1;
     let hi = 0xF000 | (s << 10) | ((off >> 12) & 0x3FF);
-    let lo = 0xD000 | (j1 << 13) | (j2 << 11) | ((off >> 1) & 0x7FF);
+    let kind = if link { 0xD000 } else { 0x9000 };
+    let lo = kind | (j1 << 13) | (j2 << 11) | ((off >> 1) & 0x7FF);
     pack(hi as u16, lo as u16)
+}
+
+fn bl(from: usize, to: usize) -> [u8; 4] {
+    branch(from, to, true)
 }
 
 fn pack(hi: u16, lo: u16) -> [u8; 4] {
@@ -76,24 +139,34 @@ fn alias_of(flash: usize) -> u32 {
     ALIAS_BASE + (flash - FLASH_ALIAS_DELTA) as u32
 }
 
-fn trampoline() -> Vec<u8> {
-    let mut t = Vec::new();
-    t.extend(movw(1, SCENE_STATE_ADDR as u16));
-    t.extend(movt(1, (SCENE_STATE_ADDR >> 16) as u16));
+fn state_pointer(p: &Profile) -> Vec<u8> {
+    let mut v = Vec::new();
+    v.extend(movw(1, p.state_addr as u16));
+    v.extend(movt(1, (p.state_addr >> 16) as u16));
+    v
+}
+
+fn trampoline(p: &Profile) -> Vec<u8> {
+    let mut t = state_pointer(p);
     // ldrh r2, [r1, #4]    previous scene
     t.extend([0x8A, 0x88]);
     // movs r0, #DATETIME
-    t.extend([SCENE_DATETIME, 0x20]);
+    t.extend([p.scene_datetime, 0x20]);
     // cmp r2, #SETTINGS
-    t.extend([SCENE_SETTINGS, 0x2A]);
+    t.extend([p.scene_settings, 0x2A]);
     // bne +0
     t.extend([0x00, 0xD1]);
     // movs r0, #SETTINGS
-    t.extend([SCENE_SETTINGS, 0x20]);
-    // strh r0, [r1, #2]    next scene
-    t.extend([0x48, 0x80]);
-    // bx lr
-    t.extend([0x70, 0x47]);
+    t.extend([p.scene_settings, 0x20]);
+    if p.inline_set_scene {
+        // strh r0, [r1, #2]    next scene
+        t.extend([0x48, 0x80]);
+        // bx lr
+        t.extend([0x70, 0x47]);
+    } else {
+        let at = TRAMPOLINE_AT + t.len();
+        t.extend(branch(at, p.set_scene, false));
+    }
     t
 }
 
@@ -103,43 +176,48 @@ struct Edit {
     after: Vec<u8>,
 }
 
-fn edits(label_index: u32) -> Vec<Edit> {
-    let mut table = Vec::new();
-    for v in ORIGINAL_PAGE1 {
-        table.extend(v.to_le_bytes());
-    }
-    let mut new_table = table.clone();
-    for v in [label_index, SCENE_LANGUAGE, 0] {
+fn original_table(p: &Profile) -> Vec<u8> {
+    p.page1_original
+        .iter()
+        .flat_map(|v| v.to_le_bytes())
+        .collect()
+}
+
+fn edits(p: &Profile, label_index: u32) -> Vec<Edit> {
+    let mut new_table = original_table(p);
+    for v in [label_index, p.scene_language, 0] {
         new_table.extend(v.to_le_bytes());
     }
-    let tramp = trampoline();
+    let tramp = trampoline(p);
 
+    let old_alias = alias_of(p.page1_table);
     let mut ptr_before = Vec::new();
-    ptr_before.extend(movw(1, 0x3FFC));
-    ptr_before.extend(movt(1, 0x1009));
+    ptr_before.extend(movw(1, old_alias as u16));
+    ptr_before.extend(movt(1, (old_alias >> 16) as u16));
     let table_alias = alias_of(TABLE_AT);
     let mut ptr_after = Vec::new();
     ptr_after.extend(movw(1, table_alias as u16));
     ptr_after.extend(movt(1, (table_alias >> 16) as u16));
 
-    let mut call_before = vec![SCENE_DATETIME, 0x20];
-    call_before.extend(bl(LANGUAGE_NEXT_SCENE + 2, 0x600138CC - 0x6000_0000));
-    let mut call_after = bl(LANGUAGE_NEXT_SCENE, TRAMPOLINE_AT).to_vec();
+    let site = p.language_next_scene;
+    let mut call_before = vec![p.scene_datetime, 0x20];
+    call_before.extend(bl(site + 2, p.set_scene));
+    let mut call_after = bl(site, TRAMPOLINE_AT).to_vec();
     call_after.extend([0x00, 0xBF]);
 
     vec![
         Edit {
-            at: SETTINGS_PAGE1_PTR,
+            at: p.page1_ptr,
             before: ptr_before,
             after: ptr_after,
         },
         Edit {
-            at: SETTINGS_PAGE1_COUNT,
+            at: p.page1_count(),
             before: vec![0x03, 0x21],
             after: vec![0x04, 0x21],
         },
         Edit {
-            at: LANGUAGE_NEXT_SCENE,
+            at: site,
             before: call_before,
             after: call_after,
         },
@@ -160,35 +238,40 @@ fn matches(bytes: &[u8], at: usize, want: &[u8]) -> bool {
     bytes.get(at..at + want.len()) == Some(want)
 }
 
-fn original_source_ok(bytes: &[u8]) -> bool {
-    let mut table = Vec::new();
-    for v in ORIGINAL_PAGE1 {
-        table.extend(v.to_le_bytes());
-    }
-    let mut state_ptr = Vec::new();
-    state_ptr.extend(movw(1, SCENE_STATE_ADDR as u16));
-    state_ptr.extend(movt(1, (SCENE_STATE_ADDR >> 16) as u16));
-    matches(bytes, SETTINGS_PAGE1_TABLE, &table)
-        && matches(bytes, SCENE_STATE_PTR, &state_ptr)
+fn original_source_ok(p: &Profile, bytes: &[u8]) -> bool {
+    matches(bytes, p.page1_table, &original_table(p))
+        && matches(bytes, p.state_site, &state_pointer(p))
         && bytes
             .get(FREE_AT..FREE_AT + FREE_LEN)
             .is_some_and(|s| s.iter().all(|&b| b == 0xFF))
+}
+
+fn find_original(bytes: &[u8]) -> Option<&'static Profile> {
+    PROFILES.iter().find(|p| {
+        original_source_ok(p, bytes) && edits(p, 0).iter().all(|e| matches(bytes, e.at, &e.before))
+    })
+}
+
+fn find_applied(bytes: &[u8]) -> Option<&'static Profile> {
+    let label = u32::from_le_bytes(bytes.get(NEW_ENTRY_AT..NEW_ENTRY_AT + 4)?.try_into().ok()?);
+    PROFILES.iter().find(|p| {
+        edits(p, label)
+            .iter()
+            .all(|e| matches(bytes, e.at, &e.after))
+    })
 }
 
 pub fn status(bytes: &[u8]) -> Status {
     if bytes.len() < FREE_AT + FREE_LEN {
         return Status::Unsupported;
     }
-    if original_source_ok(bytes) && edits(0).iter().all(|e| matches(bytes, e.at, &e.before)) {
-        return Status::Original;
+    if find_original(bytes).is_some() {
+        Status::Original
+    } else if find_applied(bytes).is_some() {
+        Status::Applied
+    } else {
+        Status::Unsupported
     }
-    if let Some(l) = bytes.get(NEW_ENTRY_AT..NEW_ENTRY_AT + 4) {
-        let label = u32::from_le_bytes(l.try_into().unwrap());
-        if edits(label).iter().all(|e| matches(bytes, e.at, &e.after)) {
-            return Status::Applied;
-        }
-    }
-    Status::Unsupported
 }
 
 pub fn applied_label(bytes: &[u8]) -> Option<u32> {
@@ -199,12 +282,12 @@ pub fn applied_label(bytes: &[u8]) -> Option<u32> {
 /// Patches the executable region. `label_index` is the zero-based string index of the
 /// menu label, identical in every language table.
 pub fn apply(bytes: &mut [u8], label_index: u32) -> Result<()> {
-    if status(bytes) != Status::Original {
+    let Some(profile) = find_original(bytes) else {
         return Err(Error::Unsupported(
             "the Settings menu code does not match the known firmware".into(),
         ));
-    }
-    for e in edits(label_index) {
+    };
+    for e in edits(profile, label_index) {
         bytes[e.at..e.at + e.after.len()].copy_from_slice(&e.after);
     }
     Ok(())
@@ -255,6 +338,23 @@ mod tests {
         assert_eq!(movt(1, 0x1009).to_vec(), vec![0xC1, 0xF2, 0x09, 0x01]);
         assert_eq!(movw(1, 0x1CB4).to_vec(), vec![0x41, 0xF6, 0xB4, 0x41]);
         assert_eq!(movt(1, 0x1800).to_vec(), vec![0xC1, 0xF6, 0x00, 0x01]);
+    }
+
+    #[test]
+    fn branch_encodings_match_known_instructions() {
+        assert_eq!(
+            branch(0xB6052, 0x8E948, false).to_vec(),
+            vec![0xD8, 0xF7, 0x79, 0xBC]
+        );
+        assert_eq!(bl(0x30448, 0xB6040).to_vec(), vec![0x85, 0xF0, 0xFA, 0xFD]);
+    }
+
+    #[test]
+    fn profiles_do_not_overlap_the_free_area() {
+        for p in &PROFILES {
+            assert!(p.page1_table < FREE_AT && p.page1_count() < FREE_AT);
+            assert!(0x40 + trampoline(p).len() <= FREE_LEN);
+        }
     }
 
     #[test]

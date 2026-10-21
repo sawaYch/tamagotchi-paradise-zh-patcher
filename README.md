@@ -61,7 +61,7 @@ https://github.com/user-attachments/assets/6a458ff1-11af-445e-888a-6f51d9bf7949
 
 The firmware only offers the language screen on first boot. The patcher adds a "Language" entry (語言) as the fourth item of the Settings menu. Choosing a language there applies it immediately and returns to Settings, without repeating the first-boot date, birthday and planet-name screens. The Chinese entry in the language list is renamed from 中文（简体） to 中文（繁體）.
 
-How it works: the patch moves the Settings menu table into unused flash, adds an entry that opens the existing language scene, appends a localized "language" label to every string table, and makes the language scene return to where it was opened from. It changes executable code, so it only applies to the exact known Glacier firmware; otherwise it is skipped and reported. Disable it with `--no-runtime-language` or the GUI checkbox.
+How it works: the patch moves the Settings menu table into unused flash, adds an entry that opens the existing language scene, appends a localized "language" label to every string table, and makes the language scene return to where it was opened from. It changes executable code, so it only applies to known firmware builds (Glacier, Tropical, Jade Forest, Sky, Water and Land); otherwise it is skipped and reported. Disable it with `--no-runtime-language` or the GUI checkbox.
 
 ## Verification status
 
