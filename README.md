@@ -53,11 +53,12 @@ Nothing is hardcoded per string. To override wording, pass a JSON file of replac
 
 - Only the Chinese language table is changed. Keys that match nothing are reported.
 - `^` at the start of a key matches only at the start of a string, `$` at the end only at the end. `<61440>` stands for the raw font code 61440 (a control code), so such codes can be kept or moved.
+- `@<id>:` at the very start of a key limits it to one string, using the id shown by `paradise-cli strings` (for example `"@20:^饮食$": "煮飯"`). Use it when the same text appears at several ids and each should read differently; scoped keys win over unscoped ones.
 - To verify a patched ROM: `paradise-cli verify original.bin patched.bin --mapping map.json`.
 
 ### Export every string as a template
 
-`paradise-cli strings <rom> --export map.json [--variant hk|tw|standard] [--grep text]` writes all distinct Chinese strings as whole-string entries (`"^设置$": "設置"`) with the converted text as the value. Edit the values you want to change; entries left as exported are ignored. Re-export if you change the variant. The GUI has an "Export all strings..." button next to the mapping field.
+`paradise-cli strings <rom> --export map.json [--variant hk|tw|standard] [--grep text]` writes all distinct Chinese strings as whole-string entries (`"^设置$": "設置"`) with the converted text as the value. A string that appears at several ids is exported once per id (`"@20:^饮食$"`, `"@69:^饮食$"`) so each can be edited separately. Edit the values you want to change; entries left as exported are ignored. Re-export if you change the variant. The GUI has an "Export all strings..." button next to the mapping field.
 
 ## Changing the language on Tamagotchi Paradise in runtime
 

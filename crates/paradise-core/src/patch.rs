@@ -324,7 +324,7 @@ pub fn verify_with(
         issues.push("string count changed".into());
     } else {
         for (i, (x, y)) in za.strings.iter().zip(&zb.strings).enumerate() {
-            if mapping.is_some_and(|m| m.applies_to(&cs, x)) {
+            if mapping.is_some_and(|m| m.applies_to(&cs, x, i + 1)) {
                 continue;
             }
             if x.len() != y.len() {

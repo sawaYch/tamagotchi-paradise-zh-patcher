@@ -8,6 +8,10 @@
 //! A key starting with `^` only matches at the start of a string and one ending with `$`
 //! only at its end. `<123>` stands for the raw font code 123, which is how control codes
 //! and symbols are written in exported templates.
+//!
+//! A key may start with `@<id>:`, as in `@20:^饮食$`, to apply only to the string with that
+//! id (the number shown by `strings`). Such keys take priority over unscoped ones, so
+//! identical strings at different ids can be given different text.
 
 use crate::charset::{latin_char, Charset};
 use crate::convert::Converter;
@@ -19,6 +23,7 @@ const PUA_BASE: u32 = 0x10_0000;
 #[derive(Debug, Clone)]
 struct Entry {
     label: String,
+    id: Option<usize>,
     key: Vec<char>,
     value: Vec<char>,
     at_start: bool,
@@ -116,6 +121,23 @@ impl Mapping {
         let mut entries = Vec::with_capacity(pairs.len());
         for (label, v) in pairs {
             let mut k = label.as_str();
+            let mut id = None;
+            if let Some(rest) = k.strip_prefix('@') {
+                let parsed = rest.split_once(':').and_then(|(digits, rest)| {
+                    digits
+                        .parse::<usize>()
+                        .ok()
+                        .filter(|&n| n > 0)
+                        .map(|n| (n, rest))
+                });
+                let Some((n, rest)) = parsed else {
+                    return Err(Error::Mapping(format!(
+                        "the key \"{label}\" has an invalid string id (use @<id>: with an id from `strings`)"
+                    )));
+                };
+                id = Some(n);
+                k = rest;
+            }
             let at_start = k.starts_with('^');
             if at_start {
                 k = &k[1..];
@@ -128,6 +150,7 @@ impl Mapping {
                 return Err(Error::Mapping(format!("the key \"{label}\" is empty")));
             }
             entries.push(Entry {
+                id,
                 key: expand(k),
                 value: expand(&v),
                 label,
@@ -136,9 +159,9 @@ impl Mapping {
             });
         }
         entries.sort_by(|a, b| {
-            b.key
-                .len()
-                .cmp(&a.key.len())
+            a.id.is_none()
+                .cmp(&b.id.is_none())
+                .then_with(|| b.key.len().cmp(&a.key.len()))
                 .then_with(|| a.label.cmp(&b.label))
         });
         Ok(Mapping { entries })
@@ -182,23 +205,25 @@ impl Mapping {
         }
     }
 
-    /// Index of the entry whose key starts at `at` in `view`, preferring the longest.
-    pub fn match_at(&self, view: &[char], at: usize) -> Option<usize> {
+    /// Index of the entry whose key starts at `at` in `view` for the string with this id,
+    /// preferring id-scoped entries, then the longest key.
+    pub fn match_at(&self, view: &[char], at: usize, id: usize) -> Option<usize> {
         let end = view
             .iter()
             .position(|&c| c as u32 == PUA_BASE)
             .unwrap_or(view.len());
         self.entries.iter().position(|e| {
-            (!e.at_start || at == 0)
+            e.id.is_none_or(|n| n == id)
+                && (!e.at_start || at == 0)
                 && view[at..].starts_with(&e.key)
                 && (!e.at_end || at + e.key.len() == end)
         })
     }
 
-    /// True if any key occurs in the string.
-    pub fn applies_to(&self, cs: &Charset, codes: &[u16]) -> bool {
+    /// True if any key occurs in the string with this id.
+    pub fn applies_to(&self, cs: &Charset, codes: &[u16], id: usize) -> bool {
         let view = view_chars(cs, codes);
-        (0..view.len()).any(|i| self.match_at(&view, i).is_some())
+        (0..view.len()).any(|i| self.match_at(&view, i, id).is_some())
     }
 }
 
@@ -206,33 +231,55 @@ fn json_string(s: &str) -> String {
     serde_json::to_string(s).expect("strings serialize")
 }
 
-/// A mapping file listing every distinct Chinese string, each as a whole-string key with
-/// its converted text as the value. Edit values to change text; entries left as they are
-/// are ignored when patching.
-pub fn export_template(table: &StringTable, cs: &Charset, conv: &Converter) -> String {
-    let mut seen = std::collections::HashSet::new();
+/// A mapping file listing the Chinese strings (only those containing `grep`, if given), each
+/// as a whole-string key with its converted text as the value. Edit values to change text;
+/// entries left as they are are ignored when patching.
+///
+/// A string that occurs at several ids gets one `@<id>:` entry per id so each can be edited
+/// on its own; other strings get a single unscoped entry.
+pub fn export_template(
+    table: &StringTable,
+    cs: &Charset,
+    conv: &Converter,
+    grep: Option<&str>,
+) -> String {
+    let sources: Vec<Option<String>> = table
+        .strings
+        .iter()
+        .map(|s| {
+            let end = s.iter().position(|&c| c == 0).unwrap_or(s.len());
+            (end > 0).then(|| render(&view_chars(cs, &s[..end])))
+        })
+        .collect();
+    let mut counts = std::collections::HashMap::new();
+    for source in sources.iter().flatten() {
+        *counts.entry(source.as_str()).or_insert(0usize) += 1;
+    }
     let mut lines = Vec::new();
-    for s in &table.strings {
+    for (i, (s, source)) in table.strings.iter().zip(&sources).enumerate() {
+        let Some(source) = source else { continue };
+        if grep.is_some_and(|g| !source.contains(g)) {
+            continue;
+        }
+        let duplicated = counts[source.as_str()] > 1;
+        let id = i + 1;
         let end = s.iter().position(|&c| c == 0).unwrap_or(s.len());
-        if end == 0 {
-            continue;
-        }
-        let codes = &s[..end];
-        let source = render(&view_chars(cs, codes));
-        if !seen.insert(source.clone()) {
-            continue;
-        }
         let converted: Vec<char> = conv
-            .convert_codes(cs, codes)
+            .convert_codes(cs, id, &s[..end])
             .iter()
             .flat_map(|t| match t.target {
                 Some(c) => vec![c],
                 None => view_chars(cs, &[t.code]),
             })
             .collect();
+        let key = if duplicated {
+            format!("@{id}:^{source}$")
+        } else {
+            format!("^{source}$")
+        };
         lines.push(format!(
             "  {}: {}",
-            json_string(&format!("^{source}$")),
+            json_string(&key),
             json_string(&render(&converted))
         ));
     }
@@ -248,7 +295,7 @@ mod tests {
         let m = Mapping::parse(r#"{"拓麻": "Tama", "拓麻文件": "Tama files"}"#).unwrap();
         assert_eq!(m.len(), 2);
         let view: Vec<char> = "拓麻文件".chars().collect();
-        let i = m.match_at(&view, 0).unwrap();
+        let i = m.match_at(&view, 0, 1).unwrap();
         assert_eq!(m.key(i), "拓麻文件");
     }
 
@@ -259,6 +306,24 @@ mod tests {
         assert!(Mapping::parse(r#"{"": "x"}"#).is_err());
         assert!(Mapping::parse(r#"{"^$": "x"}"#).is_err());
         assert!(Mapping::parse("{").is_err());
+        assert!(Mapping::parse(r#"{"@x:商店": "x"}"#).is_err());
+        assert!(Mapping::parse(r#"{"@0:商店": "x"}"#).is_err());
+        assert!(Mapping::parse(r#"{"@5商店": "x"}"#).is_err());
+        assert!(Mapping::parse(r#"{"@5:^$": "x"}"#).is_err());
+    }
+
+    #[test]
+    fn scoped_keys_apply_to_one_string_and_win() {
+        let m = Mapping::parse(r#"{"@20:^饮食$": "A", "@69:^饮食$": "B", "饮食": "C"}"#).unwrap();
+        let end = char::from_u32(PUA_BASE).unwrap();
+        let view = ['饮', '食', end];
+        let at = |id| m.match_at(&view, 0, id).map(|i| m.key(i));
+        assert_eq!(at(20).as_deref(), Some("@20:^饮食$"));
+        assert_eq!(at(69).as_deref(), Some("@69:^饮食$"));
+        assert_eq!(at(187).as_deref(), Some("饮食"));
+        let only = Mapping::parse(r#"{"@20:^饮食$": "A"}"#).unwrap();
+        assert!(only.match_at(&view, 0, 20).is_some());
+        assert!(only.match_at(&view, 0, 69).is_none());
     }
 
     #[test]
@@ -267,10 +332,10 @@ mod tests {
         let end = char::from_u32(PUA_BASE).unwrap();
         let whole = ['商', '店', end];
         let longer = ['商', '店', '码', end];
-        assert!(m.match_at(&whole, 0).is_some());
-        assert!(m.match_at(&longer, 0).is_none());
+        assert!(m.match_at(&whole, 0, 1).is_some());
+        assert!(m.match_at(&longer, 0, 1).is_none());
         let sep = char::from_u32(PUA_BASE + 61440).unwrap();
-        assert!(m.match_at(&['拓', '麻', sep], 0).is_some());
+        assert!(m.match_at(&['拓', '麻', sep], 0, 1).is_some());
         assert_eq!(expand("a<61440>b<x>"), vec!['a', sep, 'b', '<', 'x', '>']);
     }
 }

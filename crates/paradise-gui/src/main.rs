@@ -337,7 +337,7 @@ impl App {
         let cs = Charset::standard();
         let table = rom.table(rom.info().zh_table)?;
         let conv = Converter::with_mapping(self.variant, Mapping::default(), &cs)?;
-        let text = export_template(&table, &cs, &conv);
+        let text = export_template(&table, &cs, &conv, None);
         let saved = platform::save(target, text.as_bytes())?;
         self.log.push(format!("Exported strings to {saved}"));
         self.mapping = Some(MappingFile { name: saved, text });

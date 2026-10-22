@@ -165,9 +165,10 @@ impl Converter {
         self.cc.convert(s)
     }
 
-    /// Converts one string of font codes. Without a mapping there is one token per input
-    /// code and non-hanzi codes pass through untouched; mapped text yields its own tokens.
-    pub fn convert_codes(&self, cs: &Charset, codes: &[u16]) -> Vec<Token> {
+    /// Converts the string of font codes with this id (as listed by `strings`). Without a
+    /// mapping there is one token per input code and non-hanzi codes pass through
+    /// untouched; mapped text yields its own tokens.
+    pub fn convert_codes(&self, cs: &Charset, id: usize, codes: &[u16]) -> Vec<Token> {
         if self.mapping.is_empty() {
             return self.convert_plain(cs, codes);
         }
@@ -175,7 +176,7 @@ impl Converter {
         let mut out = Vec::with_capacity(codes.len());
         let (mut start, mut i) = (0, 0);
         while i < codes.len() {
-            let Some(m) = self.mapping.match_at(&view, i) else {
+            let Some(m) = self.mapping.match_at(&view, i, id) else {
                 i += 1;
                 continue;
             };
@@ -244,7 +245,7 @@ mod tests {
         let mut codes: Vec<u16> = "个们".chars().map(|c| cs.code_of(c).unwrap()).collect();
         codes.insert(1, 0x30);
         codes.push(0);
-        let t = conv.convert_codes(&cs, &codes);
+        let t = conv.convert_codes(&cs, 1, &codes);
         assert_eq!(t.len(), codes.len());
         assert_eq!(t[0].target, Some('個'));
         assert_eq!(t[1].target, None);
@@ -262,7 +263,7 @@ mod tests {
             .map(|c| cs.code_of(c).unwrap())
             .collect();
         codes.push(0);
-        let t = conv.convert_codes(&cs, &codes);
+        let t = conv.convert_codes(&cs, 1, &codes);
         let latin: Vec<u16> = "Tama".chars().map(|c| latin_code(c).unwrap()).collect();
         assert_eq!(t.iter().take(4).map(|x| x.code).collect::<Vec<_>>(), latin);
         assert!(t.iter().take(4).all(|x| x.target.is_none()));

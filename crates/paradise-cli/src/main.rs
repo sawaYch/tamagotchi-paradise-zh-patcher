@@ -10,8 +10,6 @@ use paradise_core::mapping::{describe, export_template, Mapping};
 use paradise_core::patch::{changed_glyphs, patch, verify_with, PatchOptions, RuntimeLanguage};
 use paradise_core::preview::{affected_ids, render_comparison};
 use paradise_core::rom::Rom;
-use paradise_core::strings::StringTable;
-
 #[derive(Parser)]
 #[command(
     name = "paradise-cli",
@@ -309,16 +307,8 @@ fn do_strings(
     let cs = Charset::standard();
     let table = rom.table(rom.info().zh_table)?;
     if let Some(path) = export {
-        let kept = StringTable {
-            strings: table
-                .strings
-                .iter()
-                .filter(|s| grep.is_none_or(|g| describe(&cs, s).contains(g)))
-                .cloned()
-                .collect(),
-        };
         let conv = Converter::with_mapping(variant, Mapping::default(), &cs)?;
-        let json = export_template(&kept, &cs, &conv);
+        let json = export_template(&table, &cs, &conv, grep);
         std::fs::write(path, json)?;
         println!("Wrote {}", path.display());
         return Ok(());

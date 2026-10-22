@@ -84,7 +84,8 @@ pub fn build_plan(input: &PlanInput, conv: &Converter) -> Plan {
     let converted: Vec<Vec<Token>> = zh
         .strings
         .iter()
-        .map(|s| conv.convert_codes(cs, s))
+        .enumerate()
+        .map(|(i, s)| conv.convert_codes(cs, i + 1, s))
         .collect();
 
     // target char -> source code -> occurrences

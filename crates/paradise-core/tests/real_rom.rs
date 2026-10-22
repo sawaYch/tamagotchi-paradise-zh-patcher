@@ -178,7 +178,7 @@ fn exported_template_round_trips() {
     let cs = Charset::standard();
     let table = rom.table(rom.info().zh_table).unwrap();
     let conv = Converter::new(Variant::HongKong).unwrap();
-    let json = export_template(&table, &cs, &conv);
+    let json = export_template(&table, &cs, &conv, None);
     let mapping = Mapping::parse(&json).expect("template parses");
     assert!(mapping.len() > 500);
 
