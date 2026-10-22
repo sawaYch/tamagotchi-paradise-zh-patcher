@@ -1,7 +1,9 @@
 //! Converts a BDF font into the compact glyph pack embedded by paradise-core: "FPG1" for 12px
 //! fonts (also 11px, top-left aligned) and "FPG2" for 16px fonts.
 //!
-//! Usage: glyphpack-gen <input.bdf> <output.glyphs> [12|16]
+//! Usage: glyphpack-gen <input.bdf> <output.glyphs> [12|16] [latin]
+//!
+//! By default the pack holds CJK ideographs; `latin` packs the digits, letters and `+-!?&`.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -28,13 +30,16 @@ const CELL_16: Cell = Cell {
     magic: b"FPG2",
 };
 
-fn wanted(cp: u32) -> bool {
+fn wanted(cp: u32, latin: bool) -> bool {
+    if latin {
+        return char::from_u32(cp).is_some_and(|c| c.is_ascii_alphanumeric() || "+-!?&".contains(c));
+    }
     (0x3400..=0x4DBF).contains(&cp)
         || (0x4E00..=0x9FFF).contains(&cp)
         || (0xF900..=0xFAFF).contains(&cp)
 }
 
-fn parse(text: &str, cell: Cell) -> Result<BTreeMap<u16, Vec<u8>>> {
+fn parse(text: &str, cell: Cell, latin: bool) -> Result<BTreeMap<u16, Vec<u8>>> {
     let mut out = BTreeMap::new();
     let mut lines = text.lines();
     while let Some(line) = lines.next() {
@@ -66,7 +71,7 @@ fn parse(text: &str, cell: Cell) -> Result<BTreeMap<u16, Vec<u8>>> {
                 in_bitmap = true;
             }
         }
-        if encoding < 0 || !wanted(encoding as u32) {
+        if encoding < 0 || !wanted(encoding as u32, latin) {
             continue;
         }
         let (w, h, xo, yo) = bbx;
@@ -98,15 +103,23 @@ fn parse(text: &str, cell: Cell) -> Result<BTreeMap<u16, Vec<u8>>> {
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
-    if !(3..=4).contains(&args.len()) {
-        bail!("usage: glyphpack-gen <input.bdf> <output.glyphs> [12|16]");
+    if args.len() < 3 {
+        bail!("usage: glyphpack-gen <input.bdf> <output.glyphs> [12|16] [latin]");
     }
-    let cell = match args.get(3).map(String::as_str) {
-        None | Some("12") => CELL_12,
-        Some("16") => CELL_16,
-        Some(other) => bail!("unsupported cell size {other}"),
-    };
-    let glyphs = parse(&fs::read_to_string(&args[1]).context("reading BDF")?, cell)?;
+    let (mut cell, mut latin) = (CELL_12, false);
+    for opt in &args[3..] {
+        match opt.as_str() {
+            "12" => cell = CELL_12,
+            "16" => cell = CELL_16,
+            "latin" => latin = true,
+            other => bail!("unsupported option {other}"),
+        }
+    }
+    let glyphs = parse(
+        &fs::read_to_string(&args[1]).context("reading BDF")?,
+        cell,
+        latin,
+    )?;
     let mut out = Vec::new();
     out.extend_from_slice(cell.magic);
     out.extend_from_slice(&(glyphs.len() as u32).to_le_bytes());

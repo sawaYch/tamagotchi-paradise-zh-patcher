@@ -70,6 +70,7 @@ struct Job {
     font: FontChoice,
     runtime_language: bool,
     redraw_shared: bool,
+    redraw_latin: bool,
     dry_run: bool,
     output: String,
 }
@@ -83,6 +84,7 @@ struct App {
     mapping: Option<MappingFile>,
     runtime_language: bool,
     redraw_shared: bool,
+    redraw_latin: bool,
     dry_run: bool,
     log: Vec<String>,
     rx: Option<Receiver<Msg>>,
@@ -148,6 +150,7 @@ fn run_job(job: &Job, log: &mut dyn FnMut(String)) -> Result<Finished> {
         font: job.font,
         runtime_language: job.runtime_language,
         redraw_shared: job.redraw_shared,
+        redraw_latin: job.redraw_latin,
         mapping,
     };
     let result = patch(&rom, &opts, &mut |m| log(m.to_string()))?;
@@ -189,6 +192,7 @@ impl App {
             mapping: None,
             runtime_language: true,
             redraw_shared: true,
+            redraw_latin: true,
             dry_run: false,
             log: Vec::new(),
             rx: None,
@@ -278,6 +282,7 @@ impl App {
             font: self.font,
             runtime_language: self.runtime_language,
             redraw_shared: self.redraw_shared,
+            redraw_latin: self.redraw_latin,
             dry_run: self.dry_run,
             output: self.output.clone(),
         };
@@ -532,6 +537,10 @@ impl App {
             "Redraw characters shared with Simplified (定, 哦) in the chosen font so every glyph matches",
         );
         ui.checkbox(
+            &mut self.redraw_latin,
+            "Redraw the game's Latin letters and digits in the chosen font (also changes the other languages)",
+        );
+        ui.checkbox(
             &mut self.dry_run,
             "Dry run (preview and report only, do not write a ROM)",
         );
@@ -608,6 +617,11 @@ impl App {
                 r.asset_len_before, r.asset_len_after
             ));
             ui.end_row();
+            if r.latin_glyphs > 0 {
+                ui.label("Latin glyphs redrawn");
+                ui.label(r.latin_glyphs.to_string());
+                ui.end_row();
+            }
             if r.fallback_glyphs > 0 {
                 ui.label("Glyphs from Fusion Pixel");
                 ui.add(

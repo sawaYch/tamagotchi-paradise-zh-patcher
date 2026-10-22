@@ -27,6 +27,8 @@ New glyphs come from one of these pixel fonts, chosen with `--font` or the GUI's
 - `roundpix`: [Z Labs RoundPix 12px](https://github.com/Astro-2539/ZLabs-RoundPix-12px), a rounded 12px font with mainland forms. Characters it lacks come from Fusion Pixel and are reported.
 - `unifont`: [GNU Unifont](https://unifoundry.com/unifont/) 16x16. Fills the whole glyph cell, so it looks larger than the 12px fonts.
 
+By default the game's Latin letters, digits and `+ - ! ? &` are redrawn in the chosen font too, centered in the game's fixed 9 pixel letter width. Because every language shares these glyphs, the English and other language texts change as well; accented letters keep the game's own glyphs. Keep the original Latin glyphs with `--keep-latin-glyphs` or by unchecking the GUI option.
+
 🚨 Text baked into images (title screens, menu art) is not converted.
 
 ## Target variants
@@ -114,7 +116,7 @@ flowchart TD
 
 ```
 paradise-cli inspect  <rom>
-paradise-cli patch    <rom> [-o out.bin] [--variant hk|tw|standard] [--font cubic11|fusion|ark|mona12|mona12-bold|zpix|roundpix|unifont] [--mapping map.json] [--no-runtime-language] [--dry-run] [--force]
+paradise-cli patch    <rom> [-o out.bin] [--variant hk|tw|standard] [--font cubic11|fusion|ark|mona12|mona12-bold|zpix|roundpix|unifont] [--mapping map.json] [--keep-shared-glyphs] [--keep-latin-glyphs] [--no-runtime-language] [--dry-run] [--force]
 paradise-cli strings  <rom> [--grep text] [--export map.json] [--variant hk|tw|standard]
 paradise-cli verify   <original> <patched> [--mapping map.json]
 paradise-cli preview  <original> <patched> [-o preview.png] [--limit 40]
@@ -147,6 +149,17 @@ python tools/ttf_to_bdf.py ZLabsRoundPix_12px_M_CN.ttf roundpix.bdf
 cargo run -p glyphpack-gen -- roundpix.bdf crates/paradise-core/assets/roundpix12.glyphs
 cargo run -p glyphpack-gen -- zpix.bdf crates/paradise-core/assets/zpix12.glyphs
 cargo run -p glyphpack-gen -- unifont.bdf crates/paradise-core/assets/unifont16.glyphs 16
+```
+
+The Latin packs (`latin_*.glyphs`) hold only the digits, letters and `+-!?&`. Fusion, Ark, Zpix and Unifont are packed from their BDFs with the `latin` argument; Cubic 11, Mona12 and RoundPix are rasterized in a 16x16 cell so descenders survive:
+
+```
+cargo run -p glyphpack-gen -- fusion-pixel-12px-monospaced-zh_hk.bdf crates/paradise-core/assets/latin_fusion12.glyphs latin
+cargo run -p glyphpack-gen -- unifont.bdf crates/paradise-core/assets/latin_unifont16.glyphs 16 latin
+python tools/cubic11_to_bdf.py Cubic_11.ttf cubic_latin.bdf latin
+python tools/ttf_to_bdf.py Mona12TextTC.ttf mona_latin.bdf latin
+cargo run -p glyphpack-gen -- cubic_latin.bdf crates/paradise-core/assets/latin_cubic11.glyphs 16 latin
+cargo run -p glyphpack-gen -- mona_latin.bdf crates/paradise-core/assets/latin_mona12.glyphs 16 latin
 ```
 
 The Mona12 packs come from the `Mona12Text{HK,TC}` and `Mona12Text{HK,TC}-Bold` TTFs (`mona12_zh_hk`, `mona12_zh_tw`, `mona12_bold_zh_hk`, `mona12_bold_zh_tw`). Zpix and Unifont are used from their BDF releases; the last argument is the cell size (12 by default, 16 for Unifont).

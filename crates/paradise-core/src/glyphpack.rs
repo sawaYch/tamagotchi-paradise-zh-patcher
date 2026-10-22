@@ -21,6 +21,16 @@ const MONA_BOLD_TW: &[u8] = include_bytes!("../assets/mona12_bold_zh_tw.glyphs")
 const ZPIX: &[u8] = include_bytes!("../assets/zpix12.glyphs");
 const ROUNDPIX: &[u8] = include_bytes!("../assets/roundpix12.glyphs");
 const UNIFONT: &[u8] = include_bytes!("../assets/unifont16.glyphs");
+const LATIN_FUSION: &[u8] = include_bytes!("../assets/latin_fusion12.glyphs");
+const LATIN_ARK: &[u8] = include_bytes!("../assets/latin_ark12.glyphs");
+const LATIN_CUBIC: &[u8] = include_bytes!("../assets/latin_cubic11.glyphs");
+const LATIN_MONA: &[u8] = include_bytes!("../assets/latin_mona12.glyphs");
+const LATIN_MONA_BOLD: &[u8] = include_bytes!("../assets/latin_mona12_bold.glyphs");
+const LATIN_ZPIX: &[u8] = include_bytes!("../assets/latin_zpix12.glyphs");
+const LATIN_ROUNDPIX: &[u8] = include_bytes!("../assets/latin_roundpix12.glyphs");
+const LATIN_UNIFONT: &[u8] = include_bytes!("../assets/latin_unifont16.glyphs");
+const LATIN_LEFT: usize = 3;
+const LATIN_ADVANCE: usize = 9;
 const OFFSET_X: usize = 2;
 const OFFSET_Y: usize = 3;
 
@@ -227,6 +237,45 @@ impl GlyphPack {
         Some(&self.bitmaps[i * BITMAP_BYTES..(i + 1) * BITMAP_BYTES])
     }
 
+    /// Pack with the digits, letters and `+-!?&` of a font.
+    pub fn latin_for(font: FontChoice) -> &'static GlyphPack {
+        static PACKS: [OnceLock<GlyphPack>; 8] = [const { OnceLock::new() }; 8];
+        let (slot, data) = match font {
+            FontChoice::FusionPixel => (0, LATIN_FUSION),
+            FontChoice::ArkPixel => (1, LATIN_ARK),
+            FontChoice::Cubic11 => (2, LATIN_CUBIC),
+            FontChoice::Mona12 => (3, LATIN_MONA),
+            FontChoice::Mona12Bold => (4, LATIN_MONA_BOLD),
+            FontChoice::Zpix => (5, LATIN_ZPIX),
+            FontChoice::RoundPix12 => (6, LATIN_ROUNDPIX),
+            FontChoice::Unifont => (7, LATIN_UNIFONT),
+        };
+        PACKS[slot].get_or_init(|| GlyphPack::parse(data).expect("embedded glyph pack is valid"))
+    }
+
+    /// Like `render`, with the ink centered in the game's 9 pixel wide Latin advance, which
+    /// occupies columns 3 to 11 of the glyph cell.
+    pub fn render_latin(&self, c: char) -> Option<[u8; GLYPH_PIXELS]> {
+        let px = self.render(c)?;
+        let columns = |x: usize| (0..GLYPH_DIM).any(|y| px[y * GLYPH_DIM + x] != 0);
+        let (Some(lo), Some(hi)) = (
+            (0..GLYPH_DIM).find(|&x| columns(x)),
+            (0..GLYPH_DIM).rev().find(|&x| columns(x)),
+        ) else {
+            return Some(px);
+        };
+        let width = hi - lo + 1;
+        let left = (LATIN_LEFT + (LATIN_ADVANCE.saturating_sub(width) + 1) / 2)
+            .min(GLYPH_DIM.saturating_sub(width));
+        let mut out = [0u8; GLYPH_PIXELS];
+        for y in 0..GLYPH_DIM {
+            for x in lo..=hi {
+                out[y * GLYPH_DIM + x - lo + left] = px[y * GLYPH_DIM + x];
+            }
+        }
+        Some(out)
+    }
+
     /// Renders the character into a 16x16 font cell using the game's foreground index.
     pub fn render(&self, c: char) -> Option<[u8; GLYPH_PIXELS]> {
         let bm = self.bitmap(c)?;
@@ -271,6 +320,29 @@ mod tests {
         let cubic = GlyphPack::for_font(FontChoice::Cubic11, Variant::HongKong);
         assert!(!cubic.is_fallback('體'));
         assert!(cubic.render('體') != GlyphPack::embedded().render('體'));
+    }
+
+    #[test]
+    fn every_font_has_latin_glyphs_centered_in_the_advance() {
+        let chars = || {
+            (' '..='z').filter(|&c| c != ' ' && crate::charset::latin_code(c).is_some())
+        };
+        assert_eq!(chars().count(), 67);
+        for font in FontChoice::ALL {
+            let p = GlyphPack::latin_for(font);
+            for c in chars() {
+                let px = p.render_latin(c).unwrap_or_else(|| panic!("{font:?} {c}"));
+                let cols: Vec<usize> = (0..GLYPH_DIM)
+                    .filter(|&x| (0..GLYPH_DIM).any(|y| px[y * GLYPH_DIM + x] != 0))
+                    .collect();
+                assert!(!cols.is_empty(), "{font:?} {c}");
+                let (lo, hi) = (cols[0], cols[cols.len() - 1]);
+                let width = hi - lo + 1;
+                if width <= LATIN_ADVANCE {
+                    assert!(lo >= LATIN_LEFT && hi < LATIN_LEFT + LATIN_ADVANCE, "{font:?} {c}");
+                }
+            }
+        }
     }
 
     #[test]

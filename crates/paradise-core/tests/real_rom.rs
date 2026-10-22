@@ -122,6 +122,34 @@ fn every_font_produces_a_valid_rom() {
 }
 
 #[test]
+fn latin_glyphs_are_redrawn_only_when_requested() {
+    use paradise_core::charset::latin_code;
+    use paradise_core::patch::{patch, verify, PatchOptions};
+    let Some(bytes) = load() else {
+        return;
+    };
+    let rom = Rom::load(bytes.clone()).expect("load");
+    let glyph = |r: &Rom, c: char| {
+        let code = latin_code(c).unwrap() as usize;
+        r.font().unwrap().glyph_pixels(code - 1)
+    };
+    let keep = PatchOptions {
+        redraw_latin: false,
+        ..PatchOptions::default()
+    };
+    let kept = patch(&rom, &keep, &mut |_| {}).expect("patch");
+    assert_eq!(kept.report.latin_glyphs, 0);
+    let kept_rom = Rom::load(kept.bytes).unwrap();
+    assert!(glyph(&kept_rom, 'A') == glyph(&rom, 'A'));
+
+    let out = patch(&rom, &PatchOptions::default(), &mut |_| {}).expect("patch");
+    assert_eq!(out.report.latin_glyphs, 67);
+    assert!(verify(&bytes, &out.bytes).unwrap().is_empty());
+    let after = Rom::load(out.bytes).unwrap();
+    assert!(glyph(&after, 'A') != glyph(&rom, 'A'));
+}
+
+#[test]
 fn latin_codes_match_the_game_font() {
     use paradise_core::mapping::describe;
     let Some(bytes) = load() else {

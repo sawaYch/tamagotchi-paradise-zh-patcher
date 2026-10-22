@@ -111,6 +111,9 @@ enum Command {
         /// Keep the game's own glyphs for characters shared by Simplified and Traditional
         #[arg(long)]
         keep_shared_glyphs: bool,
+        /// Keep the game's own Latin letters and digits instead of redrawing them in the font
+        #[arg(long)]
+        keep_latin_glyphs: bool,
         /// Run the conversion and report without writing the ROM
         #[arg(long)]
         dry_run: bool,
@@ -184,6 +187,7 @@ struct PatchArgs {
     mapping: Option<PathBuf>,
     runtime_language: bool,
     redraw_shared: bool,
+    redraw_latin: bool,
     dry_run: bool,
     force: bool,
 }
@@ -196,6 +200,7 @@ fn do_patch(rom_path: &Path, args: PatchArgs) -> Result<()> {
         mapping,
         runtime_language,
         redraw_shared,
+        redraw_latin,
         dry_run,
         force,
     } = args;
@@ -217,6 +222,7 @@ fn do_patch(rom_path: &Path, args: PatchArgs) -> Result<()> {
         font: font.into(),
         runtime_language,
         redraw_shared,
+        redraw_latin,
         mapping: mapping.as_deref().map(read_mapping).transpose()?,
     };
     let result = patch(&rom, &opts, &mut |m| eprintln!("- {m}"))?;
@@ -237,6 +243,7 @@ fn do_patch(rom_path: &Path, args: PatchArgs) -> Result<()> {
         );
     }
     println!("Glyph font:             {}", opts.font.label());
+    println!("Latin glyphs redrawn:   {}", r.latin_glyphs);
     if r.fallback_glyphs > 0 {
         println!(
             "Glyphs taken from Fusion Pixel (missing in the chosen font): {}",
@@ -369,6 +376,7 @@ fn main() -> Result<()> {
             mapping,
             no_runtime_language,
             keep_shared_glyphs,
+            keep_latin_glyphs,
             dry_run,
             force,
         } => do_patch(
@@ -380,6 +388,7 @@ fn main() -> Result<()> {
                 mapping,
                 runtime_language: !no_runtime_language,
                 redraw_shared: !keep_shared_glyphs,
+                redraw_latin: !keep_latin_glyphs,
                 dry_run,
                 force,
             },

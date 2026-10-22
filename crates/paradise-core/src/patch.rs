@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use encoding_rs::BIG5;
 
-use crate::charset::Charset;
+use crate::charset::{latin_code, Charset};
 use crate::convert::{Converter, Variant};
 use crate::error::{Error, Result};
 use crate::glyphpack::{FontChoice, GlyphPack};
@@ -20,6 +20,9 @@ pub struct PatchOptions {
     pub runtime_language: bool,
     /// Redraw characters shared by Simplified and Traditional in the chosen font.
     pub redraw_shared: bool,
+    /// Redraw the game's Latin letters, digits and `+-!?&` in the chosen font. This also
+    /// changes the text of the other languages.
+    pub redraw_latin: bool,
     pub mapping: Option<Mapping>,
 }
 
@@ -30,6 +33,7 @@ impl Default for PatchOptions {
             font: FontChoice::default(),
             runtime_language: true,
             redraw_shared: true,
+            redraw_latin: true,
             mapping: None,
         }
     }
@@ -53,6 +57,8 @@ pub struct PatchReport {
     pub asset_len_after: usize,
     pub font_grew: bool,
     pub fallback_glyphs: usize,
+    /// Number of Latin glyphs redrawn in the chosen font.
+    pub latin_glyphs: usize,
     /// Each mapping key with the number of times it matched.
     pub mapping_hits: Vec<(String, usize)>,
     pub runtime_language: RuntimeLanguage,
@@ -158,6 +164,19 @@ pub fn patch(rom: &Rom, opts: &PatchOptions, progress: &mut dyn FnMut(&str)) -> 
             .ok_or_else(|| Error::Format(format!("missing glyph for {}", e.ch)))?;
         font.set_glyph(Charset::glyph_of_code(e.code), &px);
     }
+    let mut latin_glyphs = Vec::new();
+    if opts.redraw_latin {
+        let latin = GlyphPack::latin_for(opts.font);
+        for c in (' '..='z').filter(|&c| c != ' ') {
+            let Some(code) = latin_code(c) else { continue };
+            let px = latin
+                .render_latin(c)
+                .ok_or_else(|| Error::Format(format!("missing Latin glyph for {c}")))?;
+            let glyph = Charset::glyph_of_code(code);
+            font.set_glyph(glyph, &px);
+            latin_glyphs.push(glyph);
+        }
+    }
 
     progress("Rebuilding assets");
     let mut patched = Rom::load(rom.bytes().to_vec())?;
@@ -208,6 +227,7 @@ pub fn patch(rom: &Rom, opts: &PatchOptions, progress: &mut dyn FnMut(&str)) -> 
         asset_len_before: info.asset_len,
         asset_len_after,
         fallback_glyphs,
+        latin_glyphs: latin_glyphs.len(),
         mapping_hits: conv.mapping_hits(),
         font_grew: font.grew(),
         runtime_language: runtime,
@@ -219,6 +239,7 @@ pub fn patch(rom: &Rom, opts: &PatchOptions, progress: &mut dyn FnMut(&str)) -> 
         .edits
         .iter()
         .map(|e| Charset::glyph_of_code(e.code))
+        .chain(latin_glyphs)
         .collect();
     let after = Rom::load(bytes.clone())?;
     let stray = changed_glyphs(rom, &after)?
