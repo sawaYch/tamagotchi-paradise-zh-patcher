@@ -4,14 +4,23 @@ use crate::convert::Variant;
 use crate::error::{fmt_err, Result};
 use crate::sprite::{FOREGROUND, GLYPH_DIM, GLYPH_PIXELS};
 
-const MAGIC: &[u8; 4] = b"FPG1";
-const BITMAP_BYTES: usize = 24;
-const SRC_DIM: usize = 12;
+const MAGIC_12: &[u8; 4] = b"FPG1";
+const MAGIC_16: &[u8; 4] = b"FPG2";
+const BITMAP_BYTES_12: usize = 24;
+const BITMAP_BYTES: usize = 32;
+const SRC_DIM_12: usize = 12;
 const FUSION: &[u8] = include_bytes!("../assets/fusion12_zh_hk.glyphs");
 const ARK_HK: &[u8] = include_bytes!("../assets/ark12_zh_hk.glyphs");
 const ARK_TW: &[u8] = include_bytes!("../assets/ark12_zh_tw.glyphs");
 const ARK_HANT: &[u8] = include_bytes!("../assets/ark12_zh_hant.glyphs");
 const CUBIC: &[u8] = include_bytes!("../assets/cubic11.glyphs");
+const MONA_HK: &[u8] = include_bytes!("../assets/mona12_zh_hk.glyphs");
+const MONA_TW: &[u8] = include_bytes!("../assets/mona12_zh_tw.glyphs");
+const MONA_BOLD_HK: &[u8] = include_bytes!("../assets/mona12_bold_zh_hk.glyphs");
+const MONA_BOLD_TW: &[u8] = include_bytes!("../assets/mona12_bold_zh_tw.glyphs");
+const ZPIX: &[u8] = include_bytes!("../assets/zpix12.glyphs");
+const ROUNDPIX: &[u8] = include_bytes!("../assets/roundpix12.glyphs");
+const UNIFONT: &[u8] = include_bytes!("../assets/unifont16.glyphs");
 const OFFSET_X: usize = 2;
 const OFFSET_Y: usize = 3;
 
@@ -25,13 +34,27 @@ pub enum FontChoice {
     /// Cubic 11 (11x11), whose forms follow Taiwan conventions.
     #[default]
     Cubic11,
+    /// Mona12, using the HK or TC forms of the chosen Traditional variant.
+    Mona12,
+    Mona12Bold,
+    /// Zpix (12px).
+    Zpix,
+    /// Z Labs RoundPix 12px, a rounded font.
+    RoundPix12,
+    /// GNU Unifont (16x16), drawn over the whole glyph cell.
+    Unifont,
 }
 
 impl FontChoice {
-    pub const ALL: [FontChoice; 3] = [
+    pub const ALL: [FontChoice; 8] = [
         FontChoice::Cubic11,
         FontChoice::FusionPixel,
         FontChoice::ArkPixel,
+        FontChoice::Mona12,
+        FontChoice::Mona12Bold,
+        FontChoice::Zpix,
+        FontChoice::RoundPix12,
+        FontChoice::Unifont,
     ];
 
     pub fn label(self) -> &'static str {
@@ -39,6 +62,11 @@ impl FontChoice {
             FontChoice::FusionPixel => "Fusion Pixel Font 12px",
             FontChoice::ArkPixel => "Ark Pixel Font 12px",
             FontChoice::Cubic11 => "Cubic 11",
+            FontChoice::Mona12 => "Mona12",
+            FontChoice::Mona12Bold => "Mona12 Bold",
+            FontChoice::Zpix => "Zpix",
+            FontChoice::RoundPix12 => "Z Labs RoundPix 12px",
+            FontChoice::Unifont => "GNU Unifont",
         }
     }
 
@@ -47,11 +75,17 @@ impl FontChoice {
             FontChoice::FusionPixel => "https://github.com/TakWolf/fusion-pixel-font",
             FontChoice::ArkPixel => "https://github.com/TakWolf/ark-pixel-font",
             FontChoice::Cubic11 => "https://github.com/ACh-K/Cubic-11",
+            FontChoice::Mona12 | FontChoice::Mona12Bold => {
+                "https://github.com/MonadABXY/mona-font"
+            }
+            FontChoice::Zpix => "https://github.com/SolidZORO/zpix-pixel-font",
+            FontChoice::RoundPix12 => "https://github.com/Astro-2539/ZLabs-RoundPix-12px",
+            FontChoice::Unifont => "https://unifoundry.com/unifont/",
         }
     }
 }
 
-/// 12x12 CJK bitmaps (SIL OFL 1.1 fonts) keyed by BMP code point.
+/// CJK bitmaps laid out in the 16x16 glyph cell, keyed by BMP code point.
 pub struct GlyphPack {
     codes: Vec<u16>,
     bitmaps: Vec<u8>,
@@ -60,12 +94,17 @@ pub struct GlyphPack {
 
 impl GlyphPack {
     pub fn parse(data: &[u8]) -> Result<GlyphPack> {
-        if data.len() < 8 || &data[0..4] != MAGIC {
+        if data.len() < 8 {
             return fmt_err("glyph pack header");
         }
+        let src_bytes = match &data[0..4] {
+            m if m == MAGIC_12 => BITMAP_BYTES_12,
+            m if m == MAGIC_16 => BITMAP_BYTES,
+            _ => return fmt_err("glyph pack header"),
+        };
         let n = u32::from_le_bytes(data[4..8].try_into().unwrap()) as usize;
         let codes_end = 8 + n * 2;
-        if data.len() != codes_end + n * BITMAP_BYTES {
+        if data.len() != codes_end + n * src_bytes {
             return fmt_err("glyph pack size");
         }
         let codes: Vec<u16> = data[8..codes_end]
@@ -75,9 +114,25 @@ impl GlyphPack {
         if codes.windows(2).any(|w| w[0] >= w[1]) {
             return fmt_err("glyph pack not sorted");
         }
+        let bitmaps = if src_bytes == BITMAP_BYTES_12 {
+            let mut cells = vec![0u8; n * BITMAP_BYTES];
+            for (src, dst) in data[codes_end..]
+                .chunks_exact(BITMAP_BYTES_12)
+                .zip(cells.chunks_exact_mut(BITMAP_BYTES))
+            {
+                for y in 0..SRC_DIM_12 {
+                    let row = u16::from_be_bytes([src[y * 2], src[y * 2 + 1]]) >> OFFSET_X;
+                    let at = (y + OFFSET_Y) * 2;
+                    dst[at..at + 2].copy_from_slice(&row.to_be_bytes());
+                }
+            }
+            cells
+        } else {
+            data[codes_end..].to_vec()
+        };
         Ok(GlyphPack {
             codes,
-            bitmaps: data[codes_end..].to_vec(),
+            bitmaps,
             fallback: Vec::new(),
         })
     }
@@ -90,13 +145,20 @@ impl GlyphPack {
     /// Pack for a font. Characters the font lacks are taken from Fusion Pixel so every
     /// character stays drawable; `is_fallback` reports which ones.
     pub fn for_font(font: FontChoice, variant: Variant) -> &'static GlyphPack {
-        static PACKS: [OnceLock<GlyphPack>; 5] = [const { OnceLock::new() }; 5];
+        static PACKS: [OnceLock<GlyphPack>; 12] = [const { OnceLock::new() }; 12];
         let (slot, data) = match (font, variant) {
             (FontChoice::FusionPixel, _) => (0, FUSION),
             (FontChoice::ArkPixel, Variant::HongKong) => (1, ARK_HK),
             (FontChoice::ArkPixel, Variant::Taiwan) => (2, ARK_TW),
             (FontChoice::ArkPixel, Variant::Standard) => (3, ARK_HANT),
             (FontChoice::Cubic11, _) => (4, CUBIC),
+            (FontChoice::Mona12, Variant::HongKong) => (5, MONA_HK),
+            (FontChoice::Mona12, _) => (6, MONA_TW),
+            (FontChoice::Mona12Bold, Variant::HongKong) => (7, MONA_BOLD_HK),
+            (FontChoice::Mona12Bold, _) => (8, MONA_BOLD_TW),
+            (FontChoice::Zpix, _) => (9, ZPIX),
+            (FontChoice::RoundPix12, _) => (10, ROUNDPIX),
+            (FontChoice::Unifont, _) => (11, UNIFONT),
         };
         PACKS[slot].get_or_init(|| {
             let primary = GlyphPack::parse(data).expect("embedded glyph pack is valid");
@@ -169,10 +231,10 @@ impl GlyphPack {
     pub fn render(&self, c: char) -> Option<[u8; GLYPH_PIXELS]> {
         let bm = self.bitmap(c)?;
         let mut px = [0u8; GLYPH_PIXELS];
-        for y in 0..SRC_DIM {
-            for x in 0..SRC_DIM {
+        for y in 0..GLYPH_DIM {
+            for x in 0..GLYPH_DIM {
                 if bm[y * 2 + x / 8] & (0x80 >> (x % 8)) != 0 {
-                    px[(y + OFFSET_Y) * GLYPH_DIM + x + OFFSET_X] = FOREGROUND;
+                    px[y * GLYPH_DIM + x] = FOREGROUND;
                 }
             }
         }
@@ -209,5 +271,27 @@ mod tests {
         let cubic = GlyphPack::for_font(FontChoice::Cubic11, Variant::HongKong);
         assert!(!cubic.is_fallback('體'));
         assert!(cubic.render('體') != GlyphPack::embedded().render('體'));
+    }
+
+    #[test]
+    fn fonts_render_distinct_glyphs_within_the_cell() {
+        let fusion = GlyphPack::embedded().render('體').unwrap();
+        for font in FontChoice::ALL {
+            let p = GlyphPack::for_font(font, Variant::HongKong);
+            for c in "體們麼點龍".chars() {
+                let px = p.render(c).unwrap();
+                assert!(px.contains(&FOREGROUND), "{font:?} {c}");
+            }
+            if !matches!(
+                font,
+                FontChoice::FusionPixel | FontChoice::ArkPixel | FontChoice::Mona12
+            ) {
+                assert!(p.render('體').unwrap() != fusion, "{font:?}");
+            }
+        }
+        let unifont = GlyphPack::for_font(FontChoice::Unifont, Variant::HongKong);
+        let px = unifont.render('體').unwrap();
+        assert!(px[..GLYPH_DIM].iter().any(|&v| v == FOREGROUND));
+        assert!(px[15 * GLYPH_DIM..].iter().any(|&v| v == FOREGROUND));
     }
 }

@@ -17,11 +17,15 @@ You can use the web version (wasm) here: https://paradise-zh-patcher.void-dojo.w
   - Ambiguous characters (发 as 發 or 髮) keep the original slot for the most common reading; the others use spare slots taken from unused Korean Hangul codes.
   - Anything that cannot be handled keeps its Simplified glyph and is listed in the report.
 
-New glyphs come from one of three pixel fonts (all SIL OFL 1.1), chosen with `--font` or the GUI's Glyph font list:
+New glyphs come from one of these pixel fonts, chosen with `--font` or the GUI's Glyph font list. All are SIL OFL 1.1 except Zpix (see [Licenses](#licenses)):
 
 - `cubic11` (default): [Cubic 11](https://github.com/ACh-K/Cubic-11), 11x11 with Taiwan-style forms. Drawn at the top left of the 12x12 area, so it looks slightly smaller.
 - `fusion`: [Fusion Pixel Font](https://github.com/TakWolf/fusion-pixel-font) 12px zh_hk. Built on Ark Pixel and matches the game's style.
 - `ark`: [Ark Pixel Font](https://github.com/TakWolf/ark-pixel-font) 12px, with zh_hk, zh_tw or zh_hant forms to match the variant. A few dozen missing characters come from Fusion Pixel and are reported.
+- `mona12`, `mona12-bold`: [Mona12](https://github.com/MonadABXY/mona-font) 12px, with the HK forms for `hk` and the TC forms for `tw` and `standard`.
+- `zpix`: [Zpix](https://github.com/SolidZORO/zpix-pixel-font) 12px. Single set of forms for Simplified and Traditional.
+- `roundpix`: [Z Labs RoundPix 12px](https://github.com/Astro-2539/ZLabs-RoundPix-12px), a rounded 12px font with mainland forms. Characters it lacks come from Fusion Pixel and are reported.
+- `unifont`: [GNU Unifont](https://unifoundry.com/unifont/) 16x16. Fills the whole glyph cell, so it looks larger than the 12px fonts.
 
 🚨 Text baked into images (title screens, menu art) is not converted.
 
@@ -109,7 +113,7 @@ flowchart TD
 
 ```
 paradise-cli inspect  <rom>
-paradise-cli patch    <rom> [-o out.bin] [--variant hk|tw|standard] [--font cubic11|fusion|ark] [--mapping map.json] [--no-runtime-language] [--dry-run] [--force]
+paradise-cli patch    <rom> [-o out.bin] [--variant hk|tw|standard] [--font cubic11|fusion|ark|mona12|mona12-bold|zpix|roundpix|unifont] [--mapping map.json] [--no-runtime-language] [--dry-run] [--force]
 paradise-cli strings  <rom> [--grep text] [--export map.json] [--variant hk|tw|standard]
 paradise-cli verify   <original> <patched> [--mapping map.json]
 paradise-cli preview  <original> <patched> [-o preview.png] [--limit 40]
@@ -136,7 +140,15 @@ cargo run -p glyphpack-gen -- fusion-pixel-12px-monospaced-zh_hk.bdf crates/para
 cargo run -p glyphpack-gen -- ark-pixel-12px-monospaced-zh_hk.bdf crates/paradise-core/assets/ark12_zh_hk.glyphs
 python tools/cubic11_to_bdf.py Cubic_11.ttf cubic11.bdf
 cargo run -p glyphpack-gen -- cubic11.bdf crates/paradise-core/assets/cubic11.glyphs
+python tools/ttf_to_bdf.py Mona12TextHK.ttf mona_hk.bdf
+cargo run -p glyphpack-gen -- mona_hk.bdf crates/paradise-core/assets/mona12_zh_hk.glyphs
+python tools/ttf_to_bdf.py ZLabsRoundPix_12px_M_CN.ttf roundpix.bdf
+cargo run -p glyphpack-gen -- roundpix.bdf crates/paradise-core/assets/roundpix12.glyphs
+cargo run -p glyphpack-gen -- zpix.bdf crates/paradise-core/assets/zpix12.glyphs
+cargo run -p glyphpack-gen -- unifont.bdf crates/paradise-core/assets/unifont16.glyphs 16
 ```
+
+The Mona12 packs come from the `Mona12Text{HK,TC}` and `Mona12Text{HK,TC}-Bold` TTFs (`mona12_zh_hk`, `mona12_zh_tw`, `mona12_bold_zh_hk`, `mona12_bold_zh_tw`). Zpix and Unifont are used from their BDF releases; the last argument is the cell size (12 by default, 16 for Unifont).
 
 ### Project Folder Structure
 
@@ -144,13 +156,15 @@ cargo run -p glyphpack-gen -- cubic11.bdf crates/paradise-core/assets/cubic11.gl
 - `crates/paradise-cli`: command line tool.
 - `crates/paradise-gui`: egui desktop app.
 - `crates/glyphpack-gen`: BDF to glyph pack converter.
+- `tools`: scripts that rasterize TTF fonts to BDF.
 
 --- 
 
 ## Licenses
 
 - This project: MIT.
-- Glyph bitmaps: Fusion Pixel Font, Ark Pixel Font and Cubic 11, SIL Open Font License 1.1. See `crates/paradise-core/assets/OFL-FusionPixel.txt`, `OFL-ArkPixel.txt` and `OFL-Cubic11.txt`.
+- Glyph bitmaps: Fusion Pixel Font, Ark Pixel Font, Cubic 11, Mona12, Z Labs RoundPix 12px and GNU Unifont, SIL Open Font License 1.1. See `crates/paradise-core/assets/OFL-*.txt`.
+- Zpix is not under the OFL. Its author allows free use for personal and educational products and charges for commercial use, and prohibits modifying, converting or redistributing the font (see its [repository](https://github.com/SolidZORO/zpix-pixel-font)). Use the `zpix` option only within those terms.
 - Conversion: [ferrous-opencc](https://github.com/apoint123/ferrous-opencc) and the [OpenCC](https://github.com/BYVoid/OpenCC) dictionaries, Apache-2.0.
 
 Research on the ROM format by others: [GMMan/tama-para-research](https://github.com/GMMan/tama-para-research).

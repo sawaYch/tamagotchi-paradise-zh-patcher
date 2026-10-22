@@ -48,6 +48,16 @@ enum FontArg {
     Ark,
     /// Cubic 11 (https://github.com/ACh-K/Cubic-11)
     Cubic11,
+    /// Mona12 (https://github.com/MonadABXY/mona-font)
+    Mona12,
+    /// Mona12 Bold
+    Mona12Bold,
+    /// Zpix (https://github.com/SolidZORO/zpix-pixel-font)
+    Zpix,
+    /// Z Labs RoundPix 12px (https://github.com/Astro-2539/ZLabs-RoundPix-12px)
+    Roundpix,
+    /// GNU Unifont, 16x16 (https://unifoundry.com/unifont/)
+    Unifont,
 }
 
 impl From<FontArg> for FontChoice {
@@ -56,6 +66,11 @@ impl From<FontArg> for FontChoice {
             FontArg::Fusion => FontChoice::FusionPixel,
             FontArg::Ark => FontChoice::ArkPixel,
             FontArg::Cubic11 => FontChoice::Cubic11,
+            FontArg::Mona12 => FontChoice::Mona12,
+            FontArg::Mona12Bold => FontChoice::Mona12Bold,
+            FontArg::Zpix => FontChoice::Zpix,
+            FontArg::Roundpix => FontChoice::RoundPix12,
+            FontArg::Unifont => FontChoice::Unifont,
         }
     }
 }

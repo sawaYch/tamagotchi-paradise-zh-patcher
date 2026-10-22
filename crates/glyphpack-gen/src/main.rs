@@ -1,15 +1,32 @@
-//! Converts a 12px (or 11px, top-left aligned) BDF font into the compact "FPG1" glyph pack embedded by paradise-core.
+//! Converts a BDF font into the compact glyph pack embedded by paradise-core: "FPG1" for 12px
+//! fonts (also 11px, top-left aligned) and "FPG2" for 16px fonts.
 //!
-//! Usage: glyphpack-gen <input.bdf> <output.glyphs>
+//! Usage: glyphpack-gen <input.bdf> <output.glyphs> [12|16]
 
 use std::collections::BTreeMap;
 use std::fs;
 
 use anyhow::{bail, Context, Result};
 
-const CELL: i32 = 12;
-const ASCENT_ROW: i32 = 9;
 const ROW_BYTES: usize = 2;
+
+#[derive(Clone, Copy)]
+struct Cell {
+    dim: i32,
+    ascent_row: i32,
+    magic: &'static [u8; 4],
+}
+
+const CELL_12: Cell = Cell {
+    dim: 12,
+    ascent_row: 9,
+    magic: b"FPG1",
+};
+const CELL_16: Cell = Cell {
+    dim: 16,
+    ascent_row: 13,
+    magic: b"FPG2",
+};
 
 fn wanted(cp: u32) -> bool {
     (0x3400..=0x4DBF).contains(&cp)
@@ -17,7 +34,7 @@ fn wanted(cp: u32) -> bool {
         || (0xF900..=0xFAFF).contains(&cp)
 }
 
-fn parse(text: &str) -> Result<BTreeMap<u16, [u8; CELL as usize * ROW_BYTES]>> {
+fn parse(text: &str, cell: Cell) -> Result<BTreeMap<u16, Vec<u8>>> {
     let mut out = BTreeMap::new();
     let mut lines = text.lines();
     while let Some(line) = lines.next() {
@@ -57,36 +74,41 @@ fn parse(text: &str) -> Result<BTreeMap<u16, [u8; CELL as usize * ROW_BYTES]>> {
             continue;
         }
         let digits_bits = ((w + 7) / 8 * 8) as u32;
-        let mut cell = [0u8; CELL as usize * ROW_BYTES];
+        let mut bitmap = vec![0u8; cell.dim as usize * ROW_BYTES];
         for (j, &bits) in rows.iter().enumerate() {
             let y = yo + h - 1 - j as i32;
-            let r = ASCENT_ROW - y;
-            if !(0..CELL).contains(&r) {
+            let r = cell.ascent_row - y;
+            if !(0..cell.dim).contains(&r) {
                 continue;
             }
             for c in 0..w {
                 if bits >> (digits_bits - 1 - c as u32) & 1 == 1 {
                     let x = xo + c;
-                    if (0..CELL).contains(&x) {
+                    if (0..cell.dim).contains(&x) {
                         let idx = r as usize * ROW_BYTES + (x as usize) / 8;
-                        cell[idx] |= 0x80 >> (x % 8);
+                        bitmap[idx] |= 0x80 >> (x % 8);
                     }
                 }
             }
         }
-        out.insert(encoding as u16, cell);
+        out.insert(encoding as u16, bitmap);
     }
     Ok(out)
 }
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
-    if args.len() != 3 {
-        bail!("usage: glyphpack-gen <input.bdf> <output.glyphs>");
+    if !(3..=4).contains(&args.len()) {
+        bail!("usage: glyphpack-gen <input.bdf> <output.glyphs> [12|16]");
     }
-    let glyphs = parse(&fs::read_to_string(&args[1]).context("reading BDF")?)?;
+    let cell = match args.get(3).map(String::as_str) {
+        None | Some("12") => CELL_12,
+        Some("16") => CELL_16,
+        Some(other) => bail!("unsupported cell size {other}"),
+    };
+    let glyphs = parse(&fs::read_to_string(&args[1]).context("reading BDF")?, cell)?;
     let mut out = Vec::new();
-    out.extend_from_slice(b"FPG1");
+    out.extend_from_slice(cell.magic);
     out.extend_from_slice(&(glyphs.len() as u32).to_le_bytes());
     for cp in glyphs.keys() {
         out.extend_from_slice(&cp.to_le_bytes());
