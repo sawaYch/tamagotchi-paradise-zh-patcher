@@ -1,9 +1,11 @@
 //! Converts a BDF font into the compact glyph pack embedded by paradise-core: "FPG1" for 12px
 //! fonts (also 11px, top-left aligned) and "FPG2" for 16px fonts.
 //!
-//! Usage: glyphpack-gen <input.bdf> <output.glyphs> [12|16] [latin]
+//! Usage: glyphpack-gen <input.bdf> <output.glyphs> [12|16] [latin] [ascent=N]
 //!
 //! By default the pack holds CJK ideographs; `latin` packs the digits, letters and `+-!?&`.
+//! `ascent=N` sets the cell row of the baseline pixel row (y = 0), for fonts whose BDF ascent
+//! differs from the 12px fonts' (9 for a 12 cell, 13 for a 16 cell).
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -106,14 +108,20 @@ fn main() -> Result<()> {
     if args.len() < 3 {
         bail!("usage: glyphpack-gen <input.bdf> <output.glyphs> [12|16] [latin]");
     }
-    let (mut cell, mut latin) = (CELL_12, false);
+    let (mut cell, mut latin, mut ascent_row) = (CELL_12, false, None);
     for opt in &args[3..] {
         match opt.as_str() {
             "12" => cell = CELL_12,
             "16" => cell = CELL_16,
             "latin" => latin = true,
-            other => bail!("unsupported option {other}"),
+            other => match other.strip_prefix("ascent=") {
+                Some(n) => ascent_row = Some(n.parse().context("ascent")?),
+                None => bail!("unsupported option {other}"),
+            },
         }
+    }
+    if let Some(ascent_row) = ascent_row {
+        cell.ascent_row = ascent_row;
     }
     let glyphs = parse(
         &fs::read_to_string(&args[1]).context("reading BDF")?,

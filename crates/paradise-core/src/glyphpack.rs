@@ -29,6 +29,15 @@ const LATIN_MONA_BOLD: &[u8] = include_bytes!("../assets/latin_mona12_bold.glyph
 const LATIN_ZPIX: &[u8] = include_bytes!("../assets/latin_zpix12.glyphs");
 const LATIN_ROUNDPIX: &[u8] = include_bytes!("../assets/latin_roundpix12.glyphs");
 const LATIN_UNIFONT: &[u8] = include_bytes!("../assets/latin_unifont16.glyphs");
+const GALMURI: &[u8] = include_bytes!("../assets/galmuri11.glyphs");
+const LATIN_GALMURI: &[u8] = include_bytes!("../assets/latin_galmuri11.glyphs");
+const FUSION_BOLD_HK: &[u8] = include_bytes!("../assets/fusion_bold12_zh_hk.glyphs");
+const FUSION_BOLD_TW: &[u8] = include_bytes!("../assets/fusion_bold12_zh_tw.glyphs");
+const FUSION_BOLD_HANT: &[u8] = include_bytes!("../assets/fusion_bold12_zh_hant.glyphs");
+const BOUTIQUE_HK: &[u8] = include_bytes!("../assets/boutique9_bold_zh_hk.glyphs");
+const BOUTIQUE_TW: &[u8] = include_bytes!("../assets/boutique9_bold_zh_tw.glyphs");
+const LATIN_FUSION_BOLD: &[u8] = include_bytes!("../assets/latin_fusion_bold12.glyphs");
+const LATIN_BOUTIQUE: &[u8] = include_bytes!("../assets/latin_boutique9_bold.glyphs");
 const LATIN_LEFT: usize = 3;
 const LATIN_ADVANCE: usize = 9;
 const OFFSET_X: usize = 2;
@@ -53,10 +62,16 @@ pub enum FontChoice {
     RoundPix12,
     /// GNU Unifont (16x16), drawn over the whole glyph cell.
     Unifont,
+    /// Galmuri11 (11px), with the Chinese characters its Hanja set covers.
+    Galmuri11,
+    /// Fusion Bold Pixel Font 12px, using the glyph forms of the chosen Traditional variant.
+    FusionBold,
+    /// BoutiqueBitmap9x9 Bold (9x9), using the HK or standard forms of the chosen variant.
+    Boutique9Bold,
 }
 
 impl FontChoice {
-    pub const ALL: [FontChoice; 8] = [
+    pub const ALL: [FontChoice; 11] = [
         FontChoice::Cubic11,
         FontChoice::FusionPixel,
         FontChoice::ArkPixel,
@@ -65,6 +80,9 @@ impl FontChoice {
         FontChoice::Zpix,
         FontChoice::RoundPix12,
         FontChoice::Unifont,
+        FontChoice::Galmuri11,
+        FontChoice::FusionBold,
+        FontChoice::Boutique9Bold,
     ];
 
     pub fn label(self) -> &'static str {
@@ -77,6 +95,9 @@ impl FontChoice {
             FontChoice::Zpix => "Zpix",
             FontChoice::RoundPix12 => "Z Labs RoundPix 12px",
             FontChoice::Unifont => "GNU Unifont",
+            FontChoice::Galmuri11 => "Galmuri11",
+            FontChoice::FusionBold => "Fusion Bold Pixel Font 12px",
+            FontChoice::Boutique9Bold => "BoutiqueBitmap9x9 Bold",
         }
     }
 
@@ -91,6 +112,9 @@ impl FontChoice {
             FontChoice::Zpix => "https://github.com/SolidZORO/zpix-pixel-font",
             FontChoice::RoundPix12 => "https://github.com/Astro-2539/ZLabs-RoundPix-12px",
             FontChoice::Unifont => "https://unifoundry.com/unifont/",
+            FontChoice::Galmuri11 => "https://github.com/quiple/galmuri",
+            FontChoice::FusionBold => "https://github.com/pixel-font-studio/fusion-bold-pixel-font",
+            FontChoice::Boutique9Bold => "https://github.com/scott0107000/BoutiqueBitmap9x9",
         }
     }
 }
@@ -155,7 +179,7 @@ impl GlyphPack {
     /// Pack for a font. Characters the font lacks are taken from Fusion Pixel so every
     /// character stays drawable; `is_fallback` reports which ones.
     pub fn for_font(font: FontChoice, variant: Variant) -> &'static GlyphPack {
-        static PACKS: [OnceLock<GlyphPack>; 12] = [const { OnceLock::new() }; 12];
+        static PACKS: [OnceLock<GlyphPack>; 18] = [const { OnceLock::new() }; 18];
         let (slot, data) = match (font, variant) {
             (FontChoice::FusionPixel, _) => (0, FUSION),
             (FontChoice::ArkPixel, Variant::HongKong) => (1, ARK_HK),
@@ -169,6 +193,12 @@ impl GlyphPack {
             (FontChoice::Zpix, _) => (9, ZPIX),
             (FontChoice::RoundPix12, _) => (10, ROUNDPIX),
             (FontChoice::Unifont, _) => (11, UNIFONT),
+            (FontChoice::Galmuri11, _) => (12, GALMURI),
+            (FontChoice::FusionBold, Variant::HongKong) => (13, FUSION_BOLD_HK),
+            (FontChoice::FusionBold, Variant::Taiwan) => (14, FUSION_BOLD_TW),
+            (FontChoice::FusionBold, Variant::Standard) => (15, FUSION_BOLD_HANT),
+            (FontChoice::Boutique9Bold, Variant::HongKong) => (16, BOUTIQUE_HK),
+            (FontChoice::Boutique9Bold, _) => (17, BOUTIQUE_TW),
         };
         PACKS[slot].get_or_init(|| {
             let primary = GlyphPack::parse(data).expect("embedded glyph pack is valid");
@@ -239,7 +269,7 @@ impl GlyphPack {
 
     /// Pack with the digits, letters and `+-!?&` of a font.
     pub fn latin_for(font: FontChoice) -> &'static GlyphPack {
-        static PACKS: [OnceLock<GlyphPack>; 8] = [const { OnceLock::new() }; 8];
+        static PACKS: [OnceLock<GlyphPack>; 11] = [const { OnceLock::new() }; 11];
         let (slot, data) = match font {
             FontChoice::FusionPixel => (0, LATIN_FUSION),
             FontChoice::ArkPixel => (1, LATIN_ARK),
@@ -249,6 +279,9 @@ impl GlyphPack {
             FontChoice::Zpix => (5, LATIN_ZPIX),
             FontChoice::RoundPix12 => (6, LATIN_ROUNDPIX),
             FontChoice::Unifont => (7, LATIN_UNIFONT),
+            FontChoice::Galmuri11 => (8, LATIN_GALMURI),
+            FontChoice::FusionBold => (9, LATIN_FUSION_BOLD),
+            FontChoice::Boutique9Bold => (10, LATIN_BOUTIQUE),
         };
         PACKS[slot].get_or_init(|| GlyphPack::parse(data).expect("embedded glyph pack is valid"))
     }

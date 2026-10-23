@@ -1,6 +1,9 @@
-"""Rasterizes a 12px pixel TTF (100 units per pixel, 1200 units per em) into a BDF.
+"""Rasterizes a pixel TTF into a BDF.
 
-Usage: python tools/ttf_to_bdf.py <font.ttf> <out.bdf> [ascent_px] [latin]
+Usage: python tools/ttf_to_bdf.py <font.ttf> <out.bdf> [ascent_px] [latin] [size=N] [xshift=N]
+
+`size` is the pixel size of the em (default 12, which suits fonts with 100 units per pixel
+and 1200 units per em). `xshift` moves the glyphs right (default 0).
 
 By default the BDF holds CJK ideographs in a 12x12 cell. With `latin` it holds the digits,
 letters and +-!?& in a 16x16 cell laid out like the 12px glyphs (2 px right, 3 px down), so
@@ -21,17 +24,26 @@ def is_latin(cp):
     return cp < 0x80 and (chr(cp).isalnum() or chr(cp) in "+-!?&")
 
 
+def option(args, name, default):
+    for a in args:
+        if a.startswith(name + "="):
+            return int(a.split("=", 1)[1])
+    return default
+
+
 def main():
     path, out_path = sys.argv[1], sys.argv[2]
     args = sys.argv[3:]
     latin = "latin" in args
     numbers = [a for a in args if a.isdigit()]
     ascent = int(numbers[0]) if numbers else 11
+    size = option(args, "size", 12)
+    xshift = option(args, "xshift", 0)
     cell, ascent_row = (16, 13) if latin else (12, 9)
-    origin = (2, 3 + ascent) if latin else (0, ascent)
+    origin = (2, 3 + ascent) if latin else (xshift, ascent)
     wanted = is_latin if latin else is_cjk
     cmap = TTFont(path).getBestCmap()
-    font = ImageFont.truetype(path, 12)
+    font = ImageFont.truetype(path, size)
     lines = []
     count = 0
     for cp in sorted(cmap):

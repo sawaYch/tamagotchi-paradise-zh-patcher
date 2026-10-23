@@ -56,6 +56,12 @@ enum FontArg {
     Roundpix,
     /// GNU Unifont, 16x16 (https://unifoundry.com/unifont/)
     Unifont,
+    /// Galmuri11 (https://github.com/quiple/galmuri)
+    Galmuri11,
+    /// Fusion Bold Pixel Font 12px (https://github.com/pixel-font-studio/fusion-bold-pixel-font)
+    FusionBold,
+    /// BoutiqueBitmap9x9 Bold (https://github.com/scott0107000/BoutiqueBitmap9x9)
+    Boutique9Bold,
 }
 
 impl From<FontArg> for FontChoice {
@@ -69,6 +75,9 @@ impl From<FontArg> for FontChoice {
             FontArg::Zpix => FontChoice::Zpix,
             FontArg::Roundpix => FontChoice::RoundPix12,
             FontArg::Unifont => FontChoice::Unifont,
+            FontArg::Galmuri11 => FontChoice::Galmuri11,
+            FontArg::FusionBold => FontChoice::FusionBold,
+            FontArg::Boutique9Bold => FontChoice::Boutique9Bold,
         }
     }
 }
