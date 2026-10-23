@@ -394,9 +394,9 @@ impl App {
     fn rom_section(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         ui.heading("1. Your ROM");
         ui.label(if platform::IS_WEB {
-            "Use your own Tamagotchi Paradise \"Glacier\" ROM (.bin). Drop a file here or browse. The ROM is processed inside your browser and is never uploaded."
+            "Use your own Tamagotchi Paradise ROM (.bin). Drop a file here or browse. The ROM is processed inside your browser and is never uploaded."
         } else {
-            "Use your own Tamagotchi Paradise \"Glacier\" ROM (.bin). Drop a file here or browse. The original file is never modified."
+            "Use your own Tamagotchi Paradise ROM (.bin). Drop a file here or browse. The original file is never modified."
         });
         ui.horizontal_wrapped(|ui| {
             if ui.button("Browse...").clicked() {
