@@ -74,6 +74,18 @@ The firmware only offers the language screen on first boot. The patcher adds a "
 
 How it works: the patch moves the Settings menu table into unused flash, adds an entry that opens the existing language scene, appends a localized "language" label to every string table, and makes the language scene return to where it was opened from. It changes executable code, so it only applies to known firmware builds (Glacier, Tropical, Jade Forest, Sky, Water and Land); otherwise it is skipped and reported. Disable it with `--no-runtime-language` or the GUI checkbox.
 
+## Paramix Studio compatibility
+
+This branch keeps the font sprite at its original size, preserving later sprite
+addresses used by Paramix item images and character previews. Allocations are
+checked against Paramix menu code, catalogs, stored saves and reserved pool pages,
+even when those pages are erased. The runtime Language entry uses a separately
+reserved page and supports compatible existing helper versions.
+
+See [Paramix compatibility and validation](docs/paramix-compatibility.md) for the
+workflow, helper formats and integration tests. These changes are included in
+builds from this branch; the upstream hosted web app is not updated by this fork.
+
 ## Verification status
 
 Text and font changes are checked structurally (re-parse, checksums, only expected data changed, every used glyph drawn) and visually through the preview. The language entry was tested in the [Capybara](https://github.com/infinition/capybara) emulator and confirmed on real hardware. Keep a backup of your original ROM anyway.
@@ -184,6 +196,23 @@ The Mona12 packs come from the `Mona12Text{HK,TC}` and `Mona12Text{HK,TC}-Bold` 
 - `tools`: scripts that rasterize TTF fonts to BDF.
 
 --- 
+
+## Credits
+
+- [sawaYch](https://github.com/sawaYch) created and maintains the original
+  [Traditional Chinese ROM patcher](https://github.com/sawaYch/tamagotchi-paradise-zh-patcher),
+  including its conversion, fonts, desktop/web interfaces and runtime language feature.
+- [mameise](https://github.com/mameise) created
+  [Paramix Studio](https://github.com/mameise/Paramix-Studio). Its menu allocation
+  formats and item/character preview references informed this interoperability work.
+- [GMMan/tama-para-research](https://github.com/GMMan/tama-para-research)
+  documents the Tamagotchi Paradise ROM format.
+- The Paramix compatibility changes, font compaction and regression tests in this
+  fork were contributed by [ZW Cai (@x43x61x69)](https://github.com/x43x61x69).
+
+Existing font, conversion-library and dictionary credits and licenses remain
+listed below. Tamagotchi Paradise belongs to its respective rights holders;
+no ROMs, firmware dumps or extracted game assets are included in this contribution.
 
 ## Licenses
 

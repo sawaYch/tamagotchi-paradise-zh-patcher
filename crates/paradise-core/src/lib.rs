@@ -4,6 +4,7 @@ pub mod convert;
 pub mod error;
 pub mod glyphpack;
 pub mod mapping;
+pub mod paramix;
 pub mod patch;
 pub mod plan;
 pub mod preview;

@@ -125,10 +125,47 @@ pub fn pack_2bpp(px: &[u8; GLYPH_PIXELS]) -> [u8; GLYPH_RAW_BYTES] {
     raw
 }
 
-fn encode_literal_payload(raw: &[u8; GLYPH_RAW_BYTES]) -> Vec<u8> {
-    let mut s = Vec::with_capacity(GLYPH_RAW_BYTES + 2);
-    s.push(0x80 | GLYPH_RAW_BYTES as u8);
-    s.extend_from_slice(raw);
+/// Smallest byte-RLE stream for one glyph. A literal-only glyph takes 68
+/// aligned bytes; runs (especially blank rows) usually make this much smaller.
+/// Minimize the unpadded size, then retain the ROM's XOR and four-byte alignment.
+fn encode_glyph_payload(raw: &[u8; GLYPH_RAW_BYTES]) -> Vec<u8> {
+    let mut cost = [0usize; GLYPH_RAW_BYTES + 1];
+    let mut choice = [(false, 0usize); GLYPH_RAW_BYTES];
+    for i in (0..GLYPH_RAW_BYTES).rev() {
+        let mut best = usize::MAX;
+        let mut step = (false, 0);
+        for len in 1..=GLYPH_RAW_BYTES - i {
+            let candidate = 1 + len + cost[i + len];
+            if candidate < best {
+                best = candidate;
+                step = (false, len);
+            }
+        }
+        for len in 1..=GLYPH_RAW_BYTES - i {
+            if raw[i + len - 1] != raw[i] {
+                break;
+            }
+            let candidate = 2 + cost[i + len];
+            if candidate < best {
+                best = candidate;
+                step = (true, len);
+            }
+        }
+        cost[i] = best;
+        choice[i] = step;
+    }
+    let mut s = Vec::with_capacity(cost[0] + 1);
+    let mut i = 0;
+    while i < GLYPH_RAW_BYTES {
+        let (repeat, len) = choice[i];
+        if repeat {
+            s.extend_from_slice(&[len as u8, raw[i]]);
+        } else {
+            s.push(0x80 | len as u8);
+            s.extend_from_slice(&raw[i..i + len]);
+        }
+        i += len;
+    }
     s.push(0);
     for b in s.iter_mut() {
         *b ^= XOR_KEY;
@@ -260,7 +297,7 @@ impl FontSprite {
 
     pub fn set_glyph(&mut self, i: usize, px: &[u8; GLYPH_PIXELS]) {
         self.drop_entry_region(i);
-        let payload = encode_literal_payload(&pack_2bpp(px));
+        let payload = encode_glyph_payload(&pack_2bpp(px));
         let off = self.alloc(payload.len());
         self.data[off..off + payload.len()].copy_from_slice(&payload);
         self.table[i] = (off as u32, payload.len() as u32);
@@ -277,6 +314,57 @@ impl FontSprite {
 
     pub fn free_bytes(&self) -> usize {
         self.free.iter().map(|f| f.1).sum()
+    }
+
+    /// Re-encode and deduplicate every live glyph, then pad to an exact blob
+    /// length. Keeping the original font extent preserves all later sprite
+    /// addresses, including absolute references kept by installed menu tools.
+    /// `serialize` itself remains an identity operation on an unedited font.
+    /// Returns the minimum required size before final padding. On failure the
+    /// font is unchanged; no glyphs or languages are discarded to make it fit.
+    pub fn compact_to_len(&mut self, target_len: usize) -> Result<usize> {
+        let table_bytes = self.table.len() * 8;
+        let fixed_bytes = self.prefix.len() + table_bytes;
+        let mut table = Vec::with_capacity(self.table.len());
+        let mut data = Vec::new();
+        let mut seen = std::collections::HashMap::<[u8; GLYPH_RAW_BYTES], (u32, u32)>::new();
+        for i in 0..self.table.len() {
+            let stored: Vec<u8> = self.payload(i).iter().map(|b| b ^ XOR_KEY).collect();
+            let raw = rle_decode(&stored);
+            let raw: [u8; GLYPH_RAW_BYTES] = raw.try_into().map_err(|r: Vec<u8>| {
+                Error::Format(format!(
+                    "glyph {i} decodes to {} bytes, expected {GLYPH_RAW_BYTES}",
+                    r.len()
+                ))
+            })?;
+            let entry = if let Some(&entry) = seen.get(&raw) {
+                entry
+            } else {
+                let payload = encode_glyph_payload(&raw);
+                let entry = (data.len() as u32, payload.len() as u32);
+                data.extend_from_slice(&payload);
+                seen.insert(raw, entry);
+                entry
+            };
+            table.push(entry);
+        }
+        let minimum = fixed_bytes + data.len();
+        if minimum > target_len || target_len > u32::MAX as usize {
+            return Err(Error::Capacity(format!(
+                "losslessly compressed font needs {minimum} bytes, but its original extent is {target_len} bytes; later sprite addresses cannot be shifted safely"
+            )));
+        }
+        let used = data.len();
+        data.resize(target_len - fixed_bytes, 0);
+        self.table = table;
+        self.data = data;
+        self.free = if self.data.len() > used {
+            vec![(used, self.data.len() - used)]
+        } else {
+            Vec::new()
+        };
+        self.grew = false;
+        Ok(minimum)
     }
 
     pub fn serialize(&self) -> Vec<u8> {
@@ -348,6 +436,96 @@ mod tests {
             *p = (i % 4) as u8;
         }
         assert_eq!(unpack_2bpp(&pack_2bpp(&px)), px);
+    }
+
+    #[test]
+    fn optimal_rle_handles_runs_literals_and_difficult_glyphs() {
+        assert_eq!(encode_glyph_payload(&[0; GLYPH_RAW_BYTES]).len(), 4);
+        let mut state = 0x1234_5678u32;
+        for case in 0..256 {
+            let mut raw = [0; GLYPH_RAW_BYTES];
+            for (i, byte) in raw.iter_mut().enumerate() {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                *byte = match case % 4 {
+                    0 => state as u8,
+                    1 => (i / 8) as u8,
+                    2 => {
+                        if i % 7 == 0 {
+                            state as u8
+                        } else {
+                            0
+                        }
+                    }
+                    _ => (i % 2) as u8,
+                };
+            }
+            let payload = encode_glyph_payload(&raw);
+            assert_eq!(payload.len() % 4, 0);
+            assert!(payload.len() <= 68);
+            let stored: Vec<u8> = payload.iter().map(|b| b ^ XOR_KEY).collect();
+            assert_eq!(rle_decode(&stored), raw);
+        }
+        let difficult = std::array::from_fn(|i| i as u8);
+        assert_eq!(encode_glyph_payload(&difficult).len(), 68);
+    }
+
+    #[test]
+    fn compaction_preserves_all_glyphs_prefix_and_original_extent() {
+        let blob = synthetic_font(8);
+        let mut font = FontSprite::parse(&blob).unwrap();
+        let mut pixels = [0; GLYPH_PIXELS];
+        for (i, p) in pixels.iter_mut().enumerate() {
+            *p = ((i * 13 + i / 16) % 4) as u8;
+        }
+        font.set_glyph(3, &pixels);
+        let expected: Vec<_> = (0..font.glyph_count())
+            .map(|i| font.glyph_pixels(i))
+            .collect();
+        let minimum = font.compact_to_len(blob.len()).unwrap();
+        assert!(minimum < blob.len());
+        let out = font.serialize();
+        assert_eq!(out.len(), blob.len());
+        assert_eq!(&out[4..24], &blob[4..24]);
+        assert!(!font.grew());
+        let parsed = FontSprite::parse(&out).unwrap();
+        for (i, pixels) in expected.iter().enumerate() {
+            assert_eq!(parsed.glyph_pixels(i), *pixels);
+        }
+    }
+
+    #[test]
+    fn deduplicated_glyphs_are_copy_on_write_and_repatch_deterministically() {
+        let blob = synthetic_font(8);
+        let mut font = FontSprite::parse(&blob).unwrap();
+        font.blank_glyph(1, 0);
+        font.compact_to_len(blob.len()).unwrap();
+        assert_eq!(font.table[0], font.table[1]);
+        let shared = font.glyph_pixels(0);
+        let raw: [u8; GLYPH_RAW_BYTES] = std::array::from_fn(|i| i as u8);
+        let edited = unpack_2bpp(&raw);
+        font.set_glyph(1, &edited);
+        assert_eq!(font.glyph_pixels(0), shared);
+        assert_eq!(font.glyph_pixels(1), edited);
+        font.compact_to_len(blob.len()).unwrap();
+        let once = font.serialize();
+        let mut loaded = FontSprite::parse(&once).unwrap();
+        loaded.set_glyph(1, &edited);
+        loaded.compact_to_len(blob.len()).unwrap();
+        assert_eq!(loaded.serialize(), once);
+        assert_eq!(loaded.glyph_pixels(0), shared);
+    }
+
+    #[test]
+    fn capacity_failure_does_not_mutate_or_drop_glyphs() {
+        let blob = synthetic_font(8);
+        let mut measured = FontSprite::parse(&blob).unwrap();
+        let minimum = measured.compact_to_len(blob.len()).unwrap();
+        let mut original = FontSprite::parse(&blob).unwrap();
+        let error = original.compact_to_len(minimum - 1).unwrap_err();
+        assert!(matches!(error, Error::Capacity(_)));
+        assert_eq!(original.serialize(), blob);
     }
 
     #[test]

@@ -8,3 +8,4 @@
 /web/.dev.vars*
 /web/.env*
 npm-debug.log*
+/dist/

@@ -84,7 +84,13 @@ fn runtime_language_patch_is_detected_and_applied_once() {
         second.report.runtime_language,
         RuntimeLanguage::AlreadyPresent
     );
-    let expected = rom.all_tables().unwrap()[0].strings.len() + 1;
+    let paramix_before =
+        paradise_core::runtime_lang::settings_labels(&bytes).and_then(|s| s.paramix);
+    let paramix_after =
+        paradise_core::runtime_lang::settings_labels(&out.bytes).and_then(|s| s.paramix);
+    let expected = rom.all_tables().unwrap()[0].strings.len()
+        + 1
+        + usize::from(paramix_before.is_none() && paramix_after.is_some());
     assert_eq!(again.all_tables().unwrap()[0].strings.len(), expected);
     assert_eq!(
         Rom::load(second.bytes).unwrap().all_tables().unwrap()[0]
@@ -100,6 +106,145 @@ fn runtime_language_patch_is_detected_and_applied_once() {
     let plain = patch(&rom, &off, &mut |_| {}).expect("patch without");
     assert_eq!(status(&plain.bytes), Status::Original);
     assert!(verify(&bytes, &plain.bytes).unwrap().is_empty());
+}
+
+/// Exercise both upgrade directions without embedding any game assets in tests.
+/// PARAMIX-only is the standalone Studio helper; Language-only models a ROM
+/// translated before Studio adds the PARAMIX launch entry.
+#[test]
+fn settings_helpers_merge_without_duplicate_or_reindexed_labels() {
+    use paradise_core::charset::latin_code;
+    use paradise_core::patch::{patch, verify, PatchOptions, RuntimeLanguage};
+    use paradise_core::{paramix, runtime_lang};
+    let Some(bytes) = load() else { return };
+    if paramix::requested_shortcut_stub(&bytes).unwrap().is_none() {
+        eprintln!("no installed Paramix menu; shared Settings integration skipped");
+        return;
+    }
+    // This test expects the source fixture before a Settings helper is added.
+    if runtime_lang::settings_labels(&bytes).is_some() {
+        return;
+    }
+    for paramix_first in [true, false] {
+        let mut standalone = Rom::load(bytes.clone()).unwrap();
+        let mut tables = standalone.all_tables().unwrap();
+        let label_index = tables[0].strings.len() as u32;
+        let labels = if paramix_first {
+            let mut label: Vec<u16> = "PARAMIX".chars().map(|c| latin_code(c).unwrap()).collect();
+            label.push(0);
+            vec![label; tables.len()]
+        } else {
+            runtime_lang::label_strings(&Charset::standard())
+        };
+        for (i, (table, label)) in tables.iter_mut().zip(labels).enumerate() {
+            table.strings.push(label);
+            standalone.set_table(i, table);
+        }
+        let mut standalone = standalone.to_bytes().unwrap();
+        runtime_lang::apply_shared(
+            &mut standalone,
+            (!paramix_first).then_some(label_index),
+            paramix_first.then_some(label_index),
+        )
+        .unwrap();
+        let initial = runtime_lang::settings_labels(&standalone).unwrap();
+        assert_eq!(initial.paramix, paramix_first.then_some(label_index));
+        assert_eq!(initial.language, (!paramix_first).then_some(label_index));
+        let before = Rom::load(standalone.clone()).unwrap();
+        let out = patch(&before, &PatchOptions::default(), &mut |_| {}).unwrap();
+        let merged = runtime_lang::settings_labels(&out.bytes).unwrap();
+        assert_eq!(
+            merged.paramix,
+            Some(if paramix_first {
+                label_index
+            } else {
+                label_index + 1
+            })
+        );
+        assert_eq!(
+            merged.language,
+            Some(if paramix_first {
+                label_index + 1
+            } else {
+                label_index
+            })
+        );
+        assert_eq!(
+            out.report.runtime_language,
+            if paramix_first {
+                RuntimeLanguage::Added
+            } else {
+                RuntimeLanguage::AlreadyPresent
+            }
+        );
+        assert!(verify(&standalone, &out.bytes).unwrap().is_empty());
+        let merged_rom = Rom::load(out.bytes.clone()).unwrap();
+        for table in merged_rom.all_tables().unwrap() {
+            assert_eq!(table.strings.len(), label_index as usize + 2);
+        }
+        let second = patch(&merged_rom, &PatchOptions::default(), &mut |_| {}).unwrap();
+        assert_eq!(
+            runtime_lang::settings_labels(&second.bytes).unwrap(),
+            merged
+        );
+        assert_eq!(
+            Rom::load(second.bytes).unwrap().all_tables().unwrap()[0]
+                .strings
+                .len(),
+            label_index as usize + 2
+        );
+        if paramix_first {
+            let disabled = PatchOptions {
+                runtime_language: false,
+                ..PatchOptions::default()
+            };
+            let out = patch(&before, &disabled, &mut |_| {}).unwrap();
+            assert_eq!(runtime_lang::settings_labels(&out.bytes).unwrap(), initial);
+            assert_eq!(
+                Rom::load(out.bytes.clone()).unwrap().all_tables().unwrap()[0]
+                    .strings
+                    .len(),
+                label_index as usize + 1
+            );
+            assert!(verify(&standalone, &out.bytes).unwrap().is_empty());
+        }
+    }
+}
+
+#[test]
+fn language_patch_respects_persisted_studio_shortcut_opt_out() {
+    use paradise_core::patch::{patch, verify, PatchOptions};
+    use paradise_core::{paramix, runtime_lang};
+    let Some(mut bytes) = load() else { return };
+    let Some(stub) = paramix::installed_stub(&bytes).unwrap() else {
+        return;
+    };
+    if runtime_lang::settings_labels(&bytes).is_some() {
+        return;
+    }
+    let program = u32::from_le_bytes(bytes[stub + 0x28..stub + 0x2C].try_into().unwrap());
+    let flags_at = (program - 0x10000000) as usize + 0x11000 + 0x140 + 36;
+    let flags = u32::from_le_bytes(bytes[flags_at..flags_at + 4].try_into().unwrap());
+    bytes[flags_at..flags_at + 4].copy_from_slice(&(flags | paramix::F_NO_SHORTCUT).to_le_bytes());
+    assert_eq!(paramix::installed_stub(&bytes).unwrap(), Some(stub));
+    assert_eq!(paramix::requested_shortcut_stub(&bytes).unwrap(), None);
+    let rom = Rom::load(bytes.clone()).unwrap();
+    let count = rom.all_tables().unwrap()[0].strings.len();
+    let out = patch(&rom, &PatchOptions::default(), &mut |_| {}).unwrap();
+    let labels = runtime_lang::settings_labels(&out.bytes).unwrap();
+    assert_eq!(labels.language, Some(count as u32));
+    assert_eq!(labels.paramix, None);
+    assert_eq!(
+        &bytes[flags_at..flags_at + 4],
+        &out.bytes[flags_at..flags_at + 4]
+    );
+    assert_eq!(
+        Rom::load(out.bytes.clone()).unwrap().all_tables().unwrap()[0]
+            .strings
+            .len(),
+        count + 1
+    );
+    assert!(verify(&bytes, &out.bytes).unwrap().is_empty());
 }
 
 #[test]

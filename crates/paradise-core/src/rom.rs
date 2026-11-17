@@ -206,6 +206,7 @@ impl Rom {
                 "patched assets would exceed the ROM size".into(),
             ));
         }
+        crate::paramix::guard_growth(&self.bytes, old_end, new_end)?;
         if new_end > old_end && out[old_end..new_end].iter().any(|&b| b != FREE_BYTE) {
             return Err(Error::Capacity(
                 "patched assets would overwrite non-empty flash after the archive".into(),
