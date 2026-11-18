@@ -207,7 +207,8 @@ pub fn reserved_ranges(bytes: &[u8]) -> Result<Vec<Range<usize>>> {
             continue;
         }
         let version = u32_at(bytes, c + 4).ok_or_else(bad)?;
-        if !(4..=10).contains(&version) || c + 608 > bytes.len() {
+        let config_size = if version >= 11 { 620 } else { 608 };
+        if !(4..=11).contains(&version) || c + config_size > bytes.len() {
             return Err(bad());
         }
         let read = |n| u32_at(bytes, c + n).map(|v| v as usize).ok_or_else(bad);
@@ -282,6 +283,22 @@ pub fn reserved_ranges(bytes: &[u8]) -> Result<Vec<Range<usize>>> {
                 }
                 .ok_or_else(bad)?;
                 add(&mut ranges, bytes, start, size)?;
+            }
+        }
+        // V11 adds an explicitly owned extension after the six-field assets.
+        // Erased pages in it are still save capacity, never spare patch space.
+        if version >= 11 {
+            let at = read(612)?;
+            let pages = read(616)?;
+            if at != 0 || pages != 0 {
+                if !(0xF00000..0xFF0000).contains(&at)
+                    || at % PAGE != 0
+                    || pages == 0
+                    || pages > (0xFF0000 - at) / PAGE
+                {
+                    return Err(bad());
+                }
+                add(&mut ranges, bytes, at, pages * PAGE)?;
             }
         }
         let id = read(28)?;
@@ -535,6 +552,35 @@ mod tests {
         assert!(r.iter().any(|r| r.contains(&0xCEE000)));
         assert!(!r.iter().any(|r| r.contains(&0x10E000)));
     }
+    #[test]
+    fn version_eleven_reserves_erased_pool_extension_and_rejects_bad_geometry() {
+        let mut original = vec![255; 0x1000000];
+        install_fixture(&mut original, 0x100000);
+        assert!(reserved_ranges(&original).is_ok()); // Existing version nine.
+        let c = 0xB7140;
+        original[c + 4..c + 8].copy_from_slice(&11u32.to_le_bytes());
+        for (at, pages, valid) in [
+            (0, 0, true),
+            (0xFB7000, 57, true),
+            (0xFB7001, 56, false),
+            (0xFB7000, 58, false),
+            (0xFF0000, 1, false),
+            (0xEFF000, 1, false),
+            (0, 57, false),
+            (0xFB7000, 0, false),
+        ] {
+            let mut bytes = original.clone();
+            bytes[c + 612..c + 616].copy_from_slice(&(at as u32).to_le_bytes());
+            bytes[c + 616..c + 620].copy_from_slice(&(pages as u32).to_le_bytes());
+            let result = reserved_ranges(&bytes);
+            assert_eq!(result.is_ok(), valid, "at={at:x}, pages={pages}");
+            if valid && pages != 0 {
+                assert!(result.unwrap().iter().any(|r| r == &(0xFB7000..0xFF0000)));
+                assert!(bytes[0xFB7000..0xFF0000].iter().all(|&b| b == 255));
+            }
+        }
+    }
+
     #[test]
     fn malformed_slot_size_does_not_turn_into_free_space() {
         let mut b = vec![255; 0x1000000];
