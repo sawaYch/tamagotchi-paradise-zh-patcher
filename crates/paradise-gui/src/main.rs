@@ -117,15 +117,25 @@ fn install_cjk_font(ctx: &egui::Context) {
     }
 }
 
-fn default_output(name: &str, dir: Option<&std::path::Path>) -> String {
+fn default_output(name: &str, dir: Option<&std::path::Path>, variant: Variant) -> String {
     let stem = std::path::Path::new(name)
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("rom");
-    let file = format!("{stem}_zh-hk.bin");
+    let file = format!("{stem}_{}.bin", variant.output_suffix());
     match dir {
         Some(d) => d.join(file).display().to_string(),
         None => file,
+    }
+}
+
+impl LoadedRom {
+    fn default_output(&self, variant: Variant) -> String {
+        default_output(
+            &self.name,
+            self.path.as_deref().and_then(|p| p.parent()),
+            variant,
+        )
     }
 }
 
@@ -256,13 +266,14 @@ impl App {
         });
         match result {
             Ok((bytes, rom)) => {
-                self.output = default_output(&name, path.as_deref().and_then(|p| p.parent()));
-                self.loaded = Some(LoadedRom {
+                let loaded = LoadedRom {
                     info: rom.info().clone(),
                     name,
                     path,
                     bytes: Arc::new(bytes),
-                });
+                };
+                self.output = loaded.default_output(self.variant);
+                self.loaded = Some(loaded);
                 self.load_error = None;
             }
             Err(e) => {
@@ -394,9 +405,9 @@ impl App {
     fn rom_section(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         ui.heading("1. Your ROM");
         ui.label(if platform::IS_WEB {
-            "Use your own Tamagotchi Paradise ROM (.bin). Drop a file here or browse. The ROM is processed inside your browser and is never uploaded."
+            "Use your own Tamagotchi Paradise or My Lab ROM (.bin). Drop a file here or browse. The ROM is processed inside your browser and is never uploaded."
         } else {
-            "Use your own Tamagotchi Paradise ROM (.bin). Drop a file here or browse. The original file is never modified."
+            "Use your own Tamagotchi Paradise or My Lab ROM (.bin). Drop a file here or browse. The original file is never modified."
         });
         ui.horizontal_wrapped(|ui| {
             if ui.button("Browse...").clicked() {
@@ -423,6 +434,11 @@ impl App {
                 ui.label("Size");
                 ui.label(format!("{} bytes", i.rom_len));
                 ui.end_row();
+                if let Some((name, id)) = i.edition_name().zip(i.edition) {
+                    ui.label("Edition");
+                    ui.label(format!("{id} ({name})"));
+                    ui.end_row();
+                }
                 ui.label("Signature");
                 ui.label(if i.signature_ok {
                     "Sonix header found"
@@ -458,6 +474,7 @@ impl App {
         let busy = self.busy();
         egui::Grid::new("opts").num_columns(2).show(ui, |ui| {
             ui.label("Target");
+            let previous_variant = self.variant;
             egui::ComboBox::from_id_salt("variant")
                 .selected_text(self.variant.label())
                 .show_ui(ui, |ui| {
@@ -465,6 +482,13 @@ impl App {
                         ui.selectable_value(&mut self.variant, v, v.label());
                     }
                 });
+            if self.variant != previous_variant {
+                if let Some(loaded) = &self.loaded {
+                    if self.output == loaded.default_output(previous_variant) {
+                        self.output = loaded.default_output(self.variant);
+                    }
+                }
+            }
             ui.end_row();
             ui.label("Glyph font");
             ui.horizontal_wrapped(|ui| {
@@ -602,6 +626,11 @@ impl App {
             ui.label("Strings changed");
             ui.label(format!("{} of {}", s.strings_changed, s.strings_total));
             ui.end_row();
+            if let Some(startup) = &r.startup {
+                ui.label("Startup strings changed");
+                ui.label(format!("{} of {}", startup.stats.strings_changed, startup.stats.strings_total));
+                ui.end_row();
+            }
             ui.label("Characters converted");
             ui.label(s.chars_converted.to_string());
             ui.end_row();
@@ -616,6 +645,9 @@ impl App {
                 "{} -> {} bytes",
                 r.asset_len_before, r.asset_len_after
             ));
+            if r.font_grew {
+                ui.label("The CJK font grew and moved later sprites.");
+            }
             ui.end_row();
             if r.latin_glyphs > 0 {
                 ui.label("Latin glyphs redrawn");
@@ -665,24 +697,31 @@ impl App {
                 format!("Mapping keys that matched nothing: {}", unused.join(", ")),
             );
         }
-        if r.unresolved.is_empty() && r.remaining_simplified.is_empty() {
-            ui.label("Every Simplified character was converted.");
+        let reports = std::iter::once(("", r)).chain(
+            r.startup.as_deref().map(|report| ("Startup: ", report)),
+        );
+        if reports.clone().all(|(_, report)| {
+            report.unresolved.is_empty() && report.remaining_simplified.is_empty()
+        }) {
+            ui.label("Every Simplified character in the converted tables was converted.");
         }
-        if !r.unresolved.is_empty() {
-            ui.colored_label(egui::Color32::YELLOW, "Could not convert:");
-            for u in &r.unresolved {
-                ui.label(show_text(&format!(
-                    "{} -> {} x{} ({})",
-                    u.source, u.target, u.count, u.reason
-                )));
+        for (prefix, report) in reports {
+            if !report.unresolved.is_empty() {
+                ui.colored_label(egui::Color32::YELLOW, format!("{prefix}Could not convert:"));
+                for u in &report.unresolved {
+                    ui.label(show_text(&format!(
+                        "{} -> {} x{} ({})",
+                        u.source, u.target, u.count, u.reason
+                    )));
+                }
             }
-        }
-        if !r.remaining_simplified.is_empty() {
-            let list: String = r.remaining_simplified.iter().map(|(c, _)| *c).collect();
-            ui.colored_label(
-                egui::Color32::YELLOW,
-                format!("Simplified characters left: {}", show_text(&list)),
-            );
+            if !report.remaining_simplified.is_empty() {
+                let list: String = report.remaining_simplified.iter().map(|(c, _)| *c).collect();
+                ui.colored_label(
+                    egui::Color32::YELLOW,
+                    format!("{prefix}Simplified characters left: {}", show_text(&list)),
+                );
+            }
         }
     }
 

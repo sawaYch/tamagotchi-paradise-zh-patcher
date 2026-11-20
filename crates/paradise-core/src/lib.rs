@@ -4,6 +4,7 @@ pub mod convert;
 pub mod error;
 pub mod glyphpack;
 pub mod mapping;
+pub mod paramix;
 pub mod patch;
 pub mod plan;
 pub mod preview;
@@ -13,3 +14,6 @@ pub mod sprite;
 pub mod strings;
 
 pub use error::{Error, Result};
+mod six_rain;
+mod neon_names;
+mod my_lab_language;

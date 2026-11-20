@@ -1,5 +1,8 @@
 use crate::error::{fmt_err, Error, Result};
 
+const FLAG_COMPRESSED_LZ4: u8 = 1 << 3;
+const RAW_LZ4_BLOCK: u32 = 1 << 31;
+const LEGACY_LZ4_TAG: [u8; 8] = [0x80, 0x80, 0x80, 0x80, b'P', b'L', b'Z', b'4'];
 pub const FLAG_COMPRESSED_BYTEWISE: u8 = 1 << 5;
 pub const FLAG_ENCRYPTED: u8 = 1 << 7;
 pub const XOR_KEY: u8 = 0x53;
@@ -125,10 +128,47 @@ pub fn pack_2bpp(px: &[u8; GLYPH_PIXELS]) -> [u8; GLYPH_RAW_BYTES] {
     raw
 }
 
-fn encode_literal_payload(raw: &[u8; GLYPH_RAW_BYTES]) -> Vec<u8> {
-    let mut s = Vec::with_capacity(GLYPH_RAW_BYTES + 2);
-    s.push(0x80 | GLYPH_RAW_BYTES as u8);
-    s.extend_from_slice(raw);
+/// Smallest byte-RLE stream for one glyph. A literal-only glyph takes 68
+/// aligned bytes; runs (especially blank rows) usually make this much smaller.
+/// Minimize the unpadded size, then retain the ROM's XOR and four-byte alignment.
+fn encode_glyph_payload(raw: &[u8; GLYPH_RAW_BYTES]) -> Vec<u8> {
+    let mut cost = [0usize; GLYPH_RAW_BYTES + 1];
+    let mut choice = [(false, 0usize); GLYPH_RAW_BYTES];
+    for i in (0..GLYPH_RAW_BYTES).rev() {
+        let mut best = usize::MAX;
+        let mut step = (false, 0);
+        for len in 1..=GLYPH_RAW_BYTES - i {
+            let candidate = 1 + len + cost[i + len];
+            if candidate < best {
+                best = candidate;
+                step = (false, len);
+            }
+        }
+        for len in 1..=GLYPH_RAW_BYTES - i {
+            if raw[i + len - 1] != raw[i] {
+                break;
+            }
+            let candidate = 2 + cost[i + len];
+            if candidate < best {
+                best = candidate;
+                step = (true, len);
+            }
+        }
+        cost[i] = best;
+        choice[i] = step;
+    }
+    let mut s = Vec::with_capacity(cost[0] + 1);
+    let mut i = 0;
+    while i < GLYPH_RAW_BYTES {
+        let (repeat, len) = choice[i];
+        if repeat {
+            s.extend_from_slice(&[len as u8, raw[i]]);
+        } else {
+            s.push(0x80 | len as u8);
+            s.extend_from_slice(&raw[i..i + len]);
+        }
+        i += len;
+    }
     s.push(0);
     for b in s.iter_mut() {
         *b ^= XOR_KEY;
@@ -139,8 +179,101 @@ fn encode_literal_payload(raw: &[u8; GLYPH_RAW_BYTES]) -> Vec<u8> {
     s
 }
 
-/// Bytewise-compressed, XOR-encrypted glyph font (one glyph per sprite).
+/// Find the smallest standard LZ4 block for the fixed 64-byte glyph. A greedy
+/// encoder leaves enough unused space across thousands of glyphs to
+/// exceed some ROMs' fixed-size font slot.
+fn encode_lz4_glyph(raw: &[u8; GLYPH_RAW_BYTES]) -> Vec<u8> {
+    const N: usize = GLYPH_RAW_BYTES;
+    const LAST_LITERALS: usize = 5;
+    const LAST_MATCH_START: usize = N - 12;
+
+    fn extension(out: &mut Vec<u8>, len: usize) {
+        if len >= 15 {
+            // Glyphs are 64 bytes, so a single length-extension byte suffices.
+            out.push((len - 15) as u8);
+        }
+    }
+
+    let mut cost = [0; N + 1];
+    let mut best_match = [(usize::MAX, 0, 0); N];
+    let mut best_start = [N; N + 1];
+    for at in (0..=N).rev() {
+        if at <= LAST_MATCH_START {
+            let limit = N - LAST_LITERALS - at;
+            let (mut longest, mut offset) = (0, 0);
+            for start in 0..at {
+                let len = (0..limit)
+                    .take_while(|&i| raw[start + i] == raw[at + i])
+                    .count();
+                if len > longest {
+                    longest = len;
+                    offset = at - start;
+                }
+                if longest == limit {
+                    break;
+                }
+            }
+            for len in 4..=longest {
+                let candidate = 2 + usize::from(len >= 19) + cost[at + len];
+                if candidate < best_match[at].0 {
+                    best_match[at] = (candidate, offset, len);
+                }
+            }
+        }
+
+        cost[at] = 1 + N - at + usize::from(N - at >= 15);
+        for (start, &(match_cost, _, _)) in best_match
+            .iter()
+            .enumerate()
+            .take(LAST_MATCH_START + 1)
+            .skip(at)
+        {
+            if match_cost == usize::MAX {
+                continue;
+            }
+            let literals = start - at;
+            let candidate = 1 + literals + usize::from(literals >= 15) + match_cost;
+            if candidate < cost[at] {
+                cost[at] = candidate;
+                best_start[at] = start;
+            }
+        }
+    }
+
+    let mut out = Vec::with_capacity(cost[0]);
+    let mut at = 0;
+    loop {
+        let start = best_start[at];
+        let literals = start - at;
+        let (offset, matched) = if start == N {
+            (0, 0)
+        } else {
+            let (_, offset, len) = best_match[start];
+            (offset, len - 4)
+        };
+        out.push((literals.min(15) as u8) << 4 | matched.min(15) as u8);
+        extension(&mut out, literals);
+        out.extend_from_slice(&raw[at..start]);
+        if start == N {
+            break;
+        }
+        out.extend_from_slice(&(offset as u16).to_le_bytes());
+        extension(&mut out, matched);
+        at = start + matched + 4;
+    }
+    out
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FontCompression {
+    ByteRle,
+    MixedRleLz4,
+    Lz4,
+}
+
+/// Compressed, XOR-encrypted glyph font (one glyph per sprite).
 pub struct FontSprite {
+    codec: FontCompression,
     prefix: Vec<u8>,
     table: Vec<(u32, u32)>,
     data: Vec<u8>,
@@ -152,11 +285,13 @@ impl FontSprite {
     pub fn parse(blob: &[u8]) -> Result<FontSprite> {
         let h =
             SpriteHeader::parse(blob).ok_or_else(|| Error::Format("font sprite header".into()))?;
-        if h.flags & (FLAG_COMPRESSED_BYTEWISE | FLAG_ENCRYPTED)
-            != (FLAG_COMPRESSED_BYTEWISE | FLAG_ENCRYPTED)
+        let codec = match h.flags
+            & (FLAG_COMPRESSED_BYTEWISE | FLAG_COMPRESSED_LZ4 | FLAG_ENCRYPTED)
         {
-            return fmt_err("font sprite is not compressed+encrypted");
-        }
+            flags if flags == FLAG_COMPRESSED_BYTEWISE | FLAG_ENCRYPTED => FontCompression::ByteRle,
+            flags if flags == FLAG_COMPRESSED_LZ4 | FLAG_ENCRYPTED => FontCompression::Lz4,
+            _ => return fmt_err("font sprite is not encrypted byte-RLE or LZ4"),
+        };
         if h.bpp != 1 || h.width as usize != GLYPH_DIM || h.height as usize != GLYPH_DIM {
             return fmt_err("font sprite is not 16x16 2bpp");
         }
@@ -169,20 +304,55 @@ impl FontSprite {
         let mut table = Vec::with_capacity(n);
         for i in 0..n {
             let o = pdo + i * 8;
-            let off = u32::from_le_bytes(blob[o..o + 4].try_into().unwrap());
+            let stored = u32::from_le_bytes(blob[o..o + 4].try_into().unwrap());
+            let raw = if codec == FontCompression::Lz4 {
+                stored & RAW_LZ4_BLOCK
+            } else {
+                0
+            };
+            let off = (stored ^ raw) as usize;
             let len = u32::from_le_bytes(blob[o + 4..o + 8].try_into().unwrap());
-            if (off as usize) < table_bytes || off as usize + len as usize > blob.len() - pdo {
+            if off < table_bytes || off > blob.len() - pdo || len as usize > blob.len() - pdo - off
+            {
                 return fmt_err(format!("glyph {i} payload out of range"));
             }
-            table.push((off - table_bytes as u32, len));
+            table.push(((off - table_bytes) as u32 | raw, len));
         }
-        Ok(FontSprite {
+        let mut font = FontSprite {
+            codec,
             prefix: blob[..pdo].to_vec(),
             table,
             data: blob[pdo + table_bytes..].to_vec(),
             free: Vec::new(),
             grew: false,
-        })
+        };
+        if codec == FontCompression::ByteRle
+            && (0..n).any(|i| {
+                font.payload(i).len() >= LEGACY_LZ4_TAG.len()
+                    && font
+                        .payload(i)
+                        .iter()
+                        .zip(LEGACY_LZ4_TAG)
+                        .all(|(&a, b)| a ^ XOR_KEY == b)
+            })
+        {
+            font.codec = FontCompression::MixedRleLz4;
+        }
+        if font.codec != FontCompression::ByteRle {
+            for i in 0..n {
+                let glyph = font.raw_glyph(i)?;
+                if glyph.len() != GLYPH_RAW_BYTES {
+                    return fmt_err(format!(
+                        "glyph {i} does not decode to {GLYPH_RAW_BYTES} bytes"
+                    ));
+                }
+            }
+        }
+        Ok(font)
+    }
+
+    pub(crate) fn uses_legacy_lz4(&self) -> bool {
+        self.codec == FontCompression::MixedRleLz4
     }
 
     pub fn glyph_count(&self) -> usize {
@@ -199,13 +369,73 @@ impl FontSprite {
 
     fn payload(&self, i: usize) -> &[u8] {
         let (off, len) = self.table[i];
-        &self.data[off as usize..(off + len) as usize]
+        let off = (off & !RAW_LZ4_BLOCK) as usize;
+        &self.data[off..off + len as usize]
+    }
+
+    fn raw_glyph(&self, i: usize) -> Result<Vec<u8>> {
+        let stored: Vec<u8> = self.payload(i).iter().map(|b| b ^ XOR_KEY).collect();
+        let compressed = if self.codec != FontCompression::Lz4 {
+            let Some(block) = stored.strip_prefix(&LEGACY_LZ4_TAG) else {
+                return Ok(rle_decode(&stored));
+            };
+            if block.get(..2) != Some(&(GLYPH_RAW_BYTES as u16).to_le_bytes()) {
+                return fmt_err(format!("invalid legacy LZ4 glyph {i} size"));
+            }
+            &block[2..]
+        } else if self.table[i].0 & RAW_LZ4_BLOCK != 0 {
+            if stored.len() != GLYPH_RAW_BYTES {
+                return fmt_err(format!(
+                    "uncompressed glyph {i} is not {GLYPH_RAW_BYTES} bytes"
+                ));
+            }
+            return Ok(stored);
+        } else {
+            &stored
+        };
+        let mut raw = vec![0; GLYPH_RAW_BYTES];
+        let size = lz4_flex::block::decompress_into(compressed, &mut raw)
+            .map_err(|e| Error::Format(format!("invalid LZ4 glyph {i}: {e}")))?;
+        if size != GLYPH_RAW_BYTES {
+            return fmt_err(format!(
+                "LZ4 glyph {i} decodes to {size} bytes, expected {GLYPH_RAW_BYTES}"
+            ));
+        }
+        Ok(raw)
+    }
+
+    fn encode_glyph(&self, raw: &[u8; GLYPH_RAW_BYTES]) -> Vec<u8> {
+        match self.codec {
+            FontCompression::ByteRle => encode_glyph_payload(raw),
+            FontCompression::MixedRleLz4 => {
+                let rle = encode_glyph_payload(raw);
+                let lz4 = encode_lz4_glyph(raw);
+                if LEGACY_LZ4_TAG.len() + 2 + lz4.len() >= rle.len() {
+                    return rle;
+                }
+                LEGACY_LZ4_TAG
+                    .into_iter()
+                    .chain((GLYPH_RAW_BYTES as u16).to_le_bytes())
+                    .chain(lz4)
+                    .map(|b| b ^ XOR_KEY)
+                    .collect()
+            }
+            FontCompression::Lz4 => {
+                let mut packed = encode_lz4_glyph(raw);
+                for byte in &mut packed {
+                    *byte ^= XOR_KEY;
+                }
+                packed
+            }
+        }
     }
 
     pub fn glyph_pixels(&self, i: usize) -> [u8; GLYPH_PIXELS] {
-        let stored: Vec<u8> = self.payload(i).iter().map(|b| b ^ XOR_KEY).collect();
-        let raw = rle_decode(&stored);
-        unpack_2bpp(&raw)
+        unpack_2bpp(
+            &self
+                .raw_glyph(i)
+                .expect("font glyph was validated on input or encoded locally"),
+        )
     }
 
     pub fn is_blank(&self, i: usize) -> bool {
@@ -213,7 +443,10 @@ impl FontSprite {
     }
 
     fn refs(&self, off: u32) -> usize {
-        self.table.iter().filter(|e| e.0 == off).count()
+        self.table
+            .iter()
+            .filter(|e| e.0 & !RAW_LZ4_BLOCK == off)
+            .count()
     }
 
     fn release(&mut self, off: usize, len: usize) {
@@ -253,6 +486,7 @@ impl FontSprite {
 
     fn drop_entry_region(&mut self, i: usize) {
         let (off, len) = self.table[i];
+        let off = off & !RAW_LZ4_BLOCK;
         if self.refs(off) == 1 {
             self.release(off as usize, len as usize);
         }
@@ -260,8 +494,8 @@ impl FontSprite {
 
     pub fn set_glyph(&mut self, i: usize, px: &[u8; GLYPH_PIXELS]) {
         self.drop_entry_region(i);
-        let payload = encode_literal_payload(&pack_2bpp(px));
-        let off = self.alloc(payload.len());
+        let payload = self.encode_glyph(&pack_2bpp(px));
+        let off = self.alloc(payload.len().next_multiple_of(4));
         self.data[off..off + payload.len()].copy_from_slice(&payload);
         self.table[i] = (off as u32, payload.len() as u32);
     }
@@ -279,12 +513,80 @@ impl FontSprite {
         self.free.iter().map(|f| f.1).sum()
     }
 
+    /// Re-encode and deduplicate every live glyph, then pad to an exact blob
+    /// length. Keeping the original font extent preserves all later sprite
+    /// addresses, including absolute references kept by installed menu tools.
+    /// `serialize` itself remains an identity operation on an unedited font.
+    /// Returns the minimum required size before final padding. On failure the
+    /// font is unchanged; no glyphs or languages are discarded to make it fit.
+    pub fn compact_to_len(&mut self, target_len: usize) -> Result<usize> {
+        self.compact(target_len, false)
+    }
+
+    pub(crate) fn compact(&mut self, target_len: usize, allow_growth: bool) -> Result<usize> {
+        let table_bytes = self.table.len() * 8;
+        let fixed_bytes = self.prefix.len() + table_bytes;
+        let mut table = Vec::with_capacity(self.table.len());
+        let mut data = Vec::new();
+        let mut seen = std::collections::HashMap::<[u8; GLYPH_RAW_BYTES], (u32, u32)>::new();
+        for i in 0..self.table.len() {
+            let raw = self.raw_glyph(i)?;
+            let raw: [u8; GLYPH_RAW_BYTES] = raw.try_into().map_err(|r: Vec<u8>| {
+                Error::Format(format!(
+                    "glyph {i} decodes to {} bytes, expected {GLYPH_RAW_BYTES}",
+                    r.len()
+                ))
+            })?;
+            let entry = if let Some(&entry) = seen.get(&raw) {
+                entry
+            } else {
+                let encoded = self.encode_glyph(&raw);
+                let (payload, raw_flag) = if self.codec != FontCompression::ByteRle
+                    && self.payload(i).len() < encoded.len()
+                {
+                    (self.payload(i), self.table[i].0 & RAW_LZ4_BLOCK)
+                } else {
+                    (encoded.as_slice(), 0)
+                };
+                let entry = (data.len() as u32 | raw_flag, payload.len() as u32);
+                data.extend_from_slice(payload);
+                data.resize(data.len().next_multiple_of(4), 0);
+                seen.insert(raw, entry);
+                entry
+            };
+            table.push(entry);
+        }
+        let minimum = fixed_bytes + data.len();
+        let final_len = if allow_growth {
+            minimum.max(target_len)
+        } else {
+            target_len
+        };
+        if minimum > final_len || final_len >= RAW_LZ4_BLOCK as usize {
+            return Err(Error::Capacity(format!(
+                "losslessly compressed font needs {minimum} bytes, but its original extent is {target_len} bytes; later sprite addresses cannot be shifted safely"
+            )));
+        }
+        let used = data.len();
+        data.resize(final_len - fixed_bytes, 0);
+        self.table = table;
+        self.data = data;
+        self.free = if self.data.len() > used {
+            vec![(used, self.data.len() - used)]
+        } else {
+            Vec::new()
+        };
+        self.grew = final_len > target_len;
+        Ok(minimum)
+    }
+
     pub fn serialize(&self) -> Vec<u8> {
         let table_bytes = self.table.len() * 8;
         let mut out = Vec::with_capacity(self.prefix.len() + table_bytes + self.data.len());
         out.extend_from_slice(&self.prefix);
         for &(off, len) in &self.table {
-            out.extend_from_slice(&(off + table_bytes as u32).to_le_bytes());
+            let stored = ((off & !RAW_LZ4_BLOCK) + table_bytes as u32) | (off & RAW_LZ4_BLOCK);
+            out.extend_from_slice(&stored.to_le_bytes());
             out.extend_from_slice(&len.to_le_bytes());
         }
         out.extend_from_slice(&self.data);
@@ -336,6 +638,52 @@ mod tests {
     }
 
     #[test]
+    fn optimal_lz4_preserves_short_glyphs() {
+        let blank = [0; GLYPH_RAW_BYTES];
+        // One initial zero, an overlapping offset-1 match, five final literals.
+        assert_eq!(
+            encode_lz4_glyph(&blank),
+            [0x1F, 0, 1, 0, 39, 0x50, 0, 0, 0, 0, 0]
+        );
+        let distinct = std::array::from_fn(|i| i as u8);
+        let patterns = std::array::from_fn(|i| ((i / 6) % 5) as u8);
+        for original in [blank, distinct, patterns] {
+            let encoded = encode_lz4_glyph(&original);
+            let mut decoded = [0; GLYPH_RAW_BYTES];
+            assert_eq!(
+                lz4_flex::block::decompress_into(&encoded, &mut decoded).unwrap(),
+                GLYPH_RAW_BYTES,
+            );
+            assert_eq!(decoded, original);
+        }
+    }
+
+    #[test]
+    fn legacy_lz4_and_rle_glyphs_repack_together() {
+        let blob = synthetic_font(2);
+        let mut font = FontSprite::parse(&blob).unwrap();
+        font.codec = FontCompression::MixedRleLz4;
+        let raw: [u8; GLYPH_RAW_BYTES] = std::array::from_fn(|i| ((i % 4) * 17) as u8);
+        let pixels = unpack_2bpp(&raw);
+        font.set_glyph(0, &pixels);
+        assert!(font
+            .payload(0)
+            .iter()
+            .zip(LEGACY_LZ4_TAG)
+            .all(|(&a, b)| a ^ XOR_KEY == b));
+        assert_eq!(font.raw_glyph(1).unwrap()[0], 1);
+        font.compact_to_len(blob.len()).unwrap();
+        let mut rebuilt = font.serialize();
+        let parsed = FontSprite::parse(&rebuilt).unwrap();
+        assert!(parsed.uses_legacy_lz4());
+        assert_eq!(parsed.glyph_pixels(0), pixels);
+        let pdo = 24;
+        let at = pdo + u32::from_le_bytes(rebuilt[pdo..pdo + 4].try_into().unwrap()) as usize;
+        rebuilt[at + LEGACY_LZ4_TAG.len()] ^= 1;
+        assert!(FontSprite::parse(&rebuilt).is_err());
+    }
+
+    #[test]
     fn rle_decodes_runs_and_literals() {
         assert_eq!(rle_decode(&[3, 7, 0x82, 1, 2, 0]), vec![7, 7, 7, 1, 2]);
         assert_eq!(rle_decode(&[0x40, 0, 0]).len(), 64);
@@ -348,6 +696,96 @@ mod tests {
             *p = (i % 4) as u8;
         }
         assert_eq!(unpack_2bpp(&pack_2bpp(&px)), px);
+    }
+
+    #[test]
+    fn optimal_rle_handles_runs_literals_and_difficult_glyphs() {
+        assert_eq!(encode_glyph_payload(&[0; GLYPH_RAW_BYTES]).len(), 4);
+        let mut state = 0x1234_5678u32;
+        for case in 0..256 {
+            let mut raw = [0; GLYPH_RAW_BYTES];
+            for (i, byte) in raw.iter_mut().enumerate() {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                *byte = match case % 4 {
+                    0 => state as u8,
+                    1 => (i / 8) as u8,
+                    2 => {
+                        if i % 7 == 0 {
+                            state as u8
+                        } else {
+                            0
+                        }
+                    }
+                    _ => (i % 2) as u8,
+                };
+            }
+            let payload = encode_glyph_payload(&raw);
+            assert_eq!(payload.len() % 4, 0);
+            assert!(payload.len() <= 68);
+            let stored: Vec<u8> = payload.iter().map(|b| b ^ XOR_KEY).collect();
+            assert_eq!(rle_decode(&stored), raw);
+        }
+        let difficult = std::array::from_fn(|i| i as u8);
+        assert_eq!(encode_glyph_payload(&difficult).len(), 68);
+    }
+
+    #[test]
+    fn compaction_preserves_all_glyphs_prefix_and_original_extent() {
+        let blob = synthetic_font(8);
+        let mut font = FontSprite::parse(&blob).unwrap();
+        let mut pixels = [0; GLYPH_PIXELS];
+        for (i, p) in pixels.iter_mut().enumerate() {
+            *p = ((i * 13 + i / 16) % 4) as u8;
+        }
+        font.set_glyph(3, &pixels);
+        let expected: Vec<_> = (0..font.glyph_count())
+            .map(|i| font.glyph_pixels(i))
+            .collect();
+        let minimum = font.compact_to_len(blob.len()).unwrap();
+        assert!(minimum < blob.len());
+        let out = font.serialize();
+        assert_eq!(out.len(), blob.len());
+        assert_eq!(&out[4..24], &blob[4..24]);
+        assert!(!font.grew());
+        let parsed = FontSprite::parse(&out).unwrap();
+        for (i, pixels) in expected.iter().enumerate() {
+            assert_eq!(parsed.glyph_pixels(i), *pixels);
+        }
+    }
+
+    #[test]
+    fn deduplicated_glyphs_are_copy_on_write_and_repatch_deterministically() {
+        let blob = synthetic_font(8);
+        let mut font = FontSprite::parse(&blob).unwrap();
+        font.blank_glyph(1, 0);
+        font.compact_to_len(blob.len()).unwrap();
+        assert_eq!(font.table[0], font.table[1]);
+        let shared = font.glyph_pixels(0);
+        let raw: [u8; GLYPH_RAW_BYTES] = std::array::from_fn(|i| i as u8);
+        let edited = unpack_2bpp(&raw);
+        font.set_glyph(1, &edited);
+        assert_eq!(font.glyph_pixels(0), shared);
+        assert_eq!(font.glyph_pixels(1), edited);
+        font.compact_to_len(blob.len()).unwrap();
+        let once = font.serialize();
+        let mut loaded = FontSprite::parse(&once).unwrap();
+        loaded.set_glyph(1, &edited);
+        loaded.compact_to_len(blob.len()).unwrap();
+        assert_eq!(loaded.serialize(), once);
+        assert_eq!(loaded.glyph_pixels(0), shared);
+    }
+
+    #[test]
+    fn capacity_failure_does_not_mutate_or_drop_glyphs() {
+        let blob = synthetic_font(8);
+        let mut measured = FontSprite::parse(&blob).unwrap();
+        let minimum = measured.compact_to_len(blob.len()).unwrap();
+        let mut original = FontSprite::parse(&blob).unwrap();
+        let error = original.compact_to_len(minimum - 1).unwrap_err();
+        assert!(matches!(error, Error::Capacity(_)));
+        assert_eq!(original.serialize(), blob);
     }
 
     #[test]

@@ -2,14 +2,14 @@
 
 https://github.com/user-attachments/assets/d334540c-14fb-4485-b4cc-196fc8aa19d5
 
-Converts the Simplified Chinese text and font in your own Tamagotchi Paradise ROM (`.bin`) to Traditional Chinese (Hong Kong by default) and writes a new ROM. No ROM or firmware is included or distributed; you supply your own dump.
+Converts the Simplified Chinese text and font in your own Tamagotchi Paradise or My Lab ROM (`.bin`) to Traditional Chinese (Hong Kong by default) and writes a new ROM. No ROM or firmware is included or distributed; you supply your own dump.
 The original file is never modified.
 
 You can use the web version (wasm) here: https://paradise-zh-patcher.void-dojo.workers.dev/ or desktop app.
 
 ## What it does
 
-- Converts every Chinese string in the ROM with OpenCC and rebuilds the archives (lengths, offsets, checksums), then verifies the result before writing.
+- Converts Chinese interface strings with OpenCC and rebuilds the archives (lengths, offsets, checksums), then verifies the result before writing.
 - Gives each converted character a glyph:
   - An existing glyph is reused when the game's font already has the Traditional character.
   - Simplified-only characters (个, 们, 国) are redrawn in place.
@@ -34,6 +34,8 @@ By default the game's Latin letters, digits and `+ - ! ? &` are redrawn in the c
 
 🚨 Text baked into images (title screens, menu art) is not converted.
 
+The desktop app, web build and CLI detect legacy RLE, mixed RLE/LZ4 on converted six-field ROMs, and native Neon LZ4 automatically.
+
 ## Target variants
 
 | Target | CLI value | OpenCC | Difference |
@@ -41,6 +43,8 @@ By default the game's Latin letters, digits and `+ - ! ? &` are redrawn in the c
 | Traditional (Hong Kong) | `hk` (default) | `s2hk` | Standard Traditional plus Hong Kong forms. |
 | Traditional (Taiwan) | `tw` | `s2tw` | Standard Traditional plus Taiwan forms. |
 | Traditional (OpenCC standard) | `standard` | `s2t` | Plain character mapping, no regional forms. |
+
+Default ROM filenames end in `_zh-hk.bin` for Hong Kong, `_zh-tw.bin` for Taiwan, and `_zht.bin` for OpenCC standard.
 
 All three convert characters only; none rewrites vocabulary (软件 stays 軟件). In this game the differences are a handful of characters:
 
@@ -72,7 +76,27 @@ https://github.com/user-attachments/assets/6a458ff1-11af-445e-888a-6f51d9bf7949
 
 The firmware only offers the language screen on first boot. The patcher adds a "Language" entry (語言) as the fourth item of the Settings menu. Choosing a language there applies it immediately and returns to Settings, without repeating the first-boot date, birthday and planet-name screens. The Chinese entry in the language list is renamed from 中文（简体） to 中文（繁體）.
 
-How it works: the patch moves the Settings menu table into unused flash, adds an entry that opens the existing language scene, appends a localized "language" label to every string table, and makes the language scene return to where it was opened from. It changes executable code, so it only applies to known firmware builds (Glacier, Tropical, Jade Forest, Sky, Water and Land); otherwise it is skipped and reported. Disable it with `--no-runtime-language` or the GUI checkbox.
+How it works: the patch moves the Settings menu table into unused flash, adds an entry that opens the existing language scene, appends a localized "language" label to every string table, and makes the language scene return to where it was opened from. It changes executable code, so it only applies to known firmware builds (Neon Planets, Glacier, Tropical, Jade Forest, Sky, Water and Land); otherwise it is skipped and reported. Disable it with `--no-runtime-language` or the GUI checkbox.
+
+## Paramix Studio compatibility
+
+This branch keeps the font sprite at its original size, preserving later sprite
+addresses used by Paramix item images and character previews. Allocations are
+checked against Paramix menu code, catalogs, stored saves and reserved pool pages,
+even when those pages are erased. The runtime Language entry uses a separately
+reserved page and supports compatible existing helper versions.
+
+Neon Planets (Edition 7) uses XOR-obfuscated LZ4 font blocks. On this edition, a font that needs extra space can grow if the ROM has no installed Paramix sprite catalog and there is room after its assets. The default Cubic 11 fits the existing size. Its native 22 mission descriptions use the same language tables, so conversion preserves their order, progress, and reward data.
+
+See [Paramix compatibility and validation](docs/paramix-compatibility.md) for the
+workflow, helper formats and integration tests. These changes are included in
+builds from this branch; the upstream hosted web app is not updated by this fork.
+
+## My Lab
+
+The patcher accepts My Lab U2 dumps. It converts the Chinese tables and fonts for the main interface and the separate startup and updater interface. The CLI `strings` command lists both tables by section and the conversion report includes both. Preview, mapping export and custom mappings use the main table. Transferable toy, accessory and food packages retain the original string codes for the receiving device.
+
+On supported My Lab v1.0.00 firmware, the runtime option adds **Language** after **Update** under **Computer > Settings**. Confirming a language updates the existing save and returns to Settings. Cancel returns to Settings with the current language. The first-run setup flow stays available on a new save.
 
 ## Verification status
 
@@ -184,6 +208,23 @@ The Mona12 packs come from the `Mona12Text{HK,TC}` and `Mona12Text{HK,TC}-Bold` 
 - `tools`: scripts that rasterize TTF fonts to BDF.
 
 --- 
+
+## Credits
+
+- [sawaYch](https://github.com/sawaYch) created and maintains the original
+  [Traditional Chinese ROM patcher](https://github.com/sawaYch/tamagotchi-paradise-zh-patcher),
+  including its conversion, fonts, desktop/web interfaces and runtime language feature.
+- [mameise](https://github.com/mameise) created
+  [Paramix Studio](https://github.com/mameise/Paramix-Studio). Its menu allocation
+  formats and item/character preview references informed this interoperability work.
+- [GMMan/tama-para-research](https://github.com/GMMan/tama-para-research)
+  documents the Tamagotchi Paradise ROM format.
+- The Paramix compatibility changes, font compaction and regression tests in this
+  fork were contributed by [ZW Cai (@x43x61x69)](https://github.com/x43x61x69).
+
+Existing font, conversion-library and dictionary credits and licenses remain
+listed below. Tamagotchi Paradise belongs to its respective rights holders;
+no ROMs, firmware dumps or extracted game assets are included in this contribution.
 
 ## Licenses
 
