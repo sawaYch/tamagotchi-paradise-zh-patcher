@@ -179,7 +179,7 @@ fn inspect(path: &Path) -> Result<()> {
         "Sonix signature:      {}",
         if i.signature_ok { "ok" } else { "missing" }
     );
-    println!("Asset archive:        {} bytes at 0x111000", i.asset_len);
+    println!("Asset archive:        {} bytes at {:#x}", i.asset_len, i.asset_base);
     println!(
         "Archive checksums:    {}",
         if i.top_checksum_ok && i.strings_checksum_ok {
@@ -197,6 +197,10 @@ fn inspect(path: &Path) -> Result<()> {
         "Chinese string table: #{} ({} strings, {} distinct hanzi)",
         i.zh_table, i.zh_string_count, i.zh_hanzi_distinct
     );
+    if let Some(startup) = rom.startup()? {
+        println!("Startup Chinese table: #{} ({} strings)", startup.info().zh_table,
+            startup.info().zh_string_count);
+    }
     Ok(())
 }
 
@@ -252,6 +256,17 @@ fn do_patch(rom_path: &Path, args: PatchArgs) -> Result<()> {
         "Strings changed:      {} of {}",
         r.stats.strings_changed, r.stats.strings_total
     );
+    if let Some(startup) = &r.startup {
+        println!("Startup strings changed: {} of {}", startup.stats.strings_changed,
+            startup.stats.strings_total);
+        for unresolved in &startup.unresolved {
+            println!("Startup unresolved: {} -> {} x{} ({})", unresolved.source,
+                unresolved.target, unresolved.count, unresolved.reason);
+        }
+        for &(ch, count) in &startup.remaining_simplified {
+            println!("Startup Simplified character remaining: {ch} x{count}");
+        }
+    }
     println!("Characters converted: {}", r.stats.chars_converted);
     println!("Existing glyphs reused: {}", r.stats.reused_codes);
     println!("Glyph slots reskinned:  {}", r.stats.reskinned);
@@ -350,10 +365,20 @@ fn do_strings(
         println!("Wrote {}", path.display());
         return Ok(());
     }
-    for (i, s) in table.strings.iter().enumerate() {
-        let text = describe(&cs, s);
-        if !text.is_empty() && grep.is_none_or(|g| text.contains(g)) {
-            println!("{:>4}  {text}", i + 1);
+    let startup = rom.startup()?;
+    let mut scopes = vec![("Main", table)];
+    if let Some(startup) = &startup {
+        scopes.push(("Startup", startup.table(startup.info().zh_table)?));
+    }
+    for (label, table) in scopes {
+        if startup.is_some() {
+            println!("[{label}]");
+        }
+        for (i, s) in table.strings.iter().enumerate() {
+            let text = describe(&cs, s);
+            if !text.is_empty() && grep.is_none_or(|g| text.contains(g)) {
+                println!("{:>4}  {text}", i + 1);
+            }
         }
     }
     Ok(())

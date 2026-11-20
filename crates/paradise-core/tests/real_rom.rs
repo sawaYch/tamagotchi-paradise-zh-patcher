@@ -86,8 +86,96 @@ fn patch_produces_valid_rom() {
         assert_eq!(again.sprite_blobs()[19].len(), rom.sprite_blobs()[19].len());
         assert_eq!(again.sprite_blobs()[19][4], 0x8f);
     }
+    if rom.info().edition_name() == Some("My Lab") {
+        use paradise_core::arc;
+
+        assert_eq!(rom.info().asset_base, 0x211000);
+        assert_eq!(rom.info().zh_string_count, 680);
+        assert_eq!(
+            r.runtime_language,
+            paradise_core::patch::RuntimeLanguage::Added
+        );
+        let startup_report = r.startup.as_ref().expect("startup conversion report");
+        assert_eq!(startup_report.stats.strings_total, 44);
+        assert!(startup_report.stats.strings_changed > 0);
+        assert!(startup_report.unresolved.is_empty());
+        assert!(startup_report.remaining_simplified.is_empty());
+        let boot = 0x51000;
+        let boot_end = boot + arc::total_len(&bytes[boot..]).unwrap();
+        assert_ne!(out.bytes[boot..boot_end], bytes[boot..boot_end]);
+        assert!(arc::checksum_ok(&out.bytes[boot..]));
+        let mut expected = bytes.clone();
+        paradise_core::runtime_lang::reproduce_settings(&mut expected, &out.bytes).unwrap();
+        assert_eq!(out.bytes[boot_end..0x211000], expected[boot_end..0x211000]);
+        assert_eq!(
+            paradise_core::runtime_lang::applied_label(&out.bytes),
+            Some(680)
+        );
+
+        let mut corrupted = out.bytes.clone();
+        corrupted[0x111000] ^= 1;
+        assert!(!verify(&bytes, &corrupted).unwrap().is_empty());
+    }
     let second = patch(&again, &PatchOptions::default(), &mut |_| {}).expect("repatch");
     assert!(second.report.stats.chars_changed < r.stats.chars_changed / 4 + 50);
+}
+
+#[test]
+fn my_lab_converts_chinese_in_both_local_interfaces() {
+    use paradise_core::convert::{Converter, Variant};
+    use paradise_core::patch::{patch, PatchOptions, PatchReport};
+
+    let Some(bytes) = load() else { return };
+    let original = Rom::load(bytes).unwrap();
+    let Some(startup) = original.startup().unwrap() else { return };
+    let options = PatchOptions {
+        variant: Variant::Taiwan,
+        ..PatchOptions::default()
+    };
+    let output = patch(&original, &options, &mut |_| {}).unwrap();
+    let patched = Rom::load(output.bytes).unwrap();
+    let patched_startup = patched.startup().unwrap().unwrap();
+    let cs = Charset::standard();
+    let converter = Converter::new(options.variant).unwrap();
+
+    let verify_text = |before: &Rom, after: &Rom, report: &PatchReport, label_id| {
+        let before = before.table(before.info().zh_table).unwrap();
+        let after = after.table(after.info().zh_table).unwrap();
+        let rendered_character = |code| {
+            report.edits.iter().find(|edit| edit.code == code)
+                .map(|edit| edit.ch)
+                .or_else(|| cs.char_of_code(code))
+        };
+        for (index, (source, target)) in before.strings.iter().zip(&after.strings).enumerate() {
+            let id = index + 1;
+            if id == label_id {
+                assert_eq!(
+                    [target[0], target[1], target[3], target[4]].map(rendered_character),
+                    [Some('中'), Some('文'), Some('繁'), Some('體')]
+                );
+                continue;
+            }
+            let expected = converter.convert_codes(&cs, id, source);
+            assert_eq!(expected.len(), target.len(), "string {id}");
+            for (token, &code) in expected.iter().zip(target) {
+                if let Some(ch) = token.target {
+                    assert_eq!(rendered_character(code), Some(ch), "string {id}");
+                } else {
+                    assert_eq!(code, token.code, "string {id}");
+                }
+            }
+        }
+    };
+    verify_text(&original, &patched, &output.report, 97);
+    verify_text(&startup, &patched_startup, output.report.startup.as_deref().unwrap(), 9);
+
+    let main = patched.table(patched.info().zh_table).unwrap();
+    let label = main.strings.last().unwrap();
+    let text: String = label[..label.len() - 1].iter().map(|&code| {
+        output.report.edits.iter().find(|edit| edit.code == code)
+            .map(|edit| edit.ch).or_else(|| cs.char_of_code(code)).unwrap()
+    }).collect();
+    assert_eq!(text, "語言");
 }
 
 #[test]
@@ -177,8 +265,8 @@ fn runtime_language_patch_is_detected_and_applied_once() {
     let Some(bytes) = load() else {
         return;
     };
-    assert_eq!(status(&bytes), Status::Original);
     let rom = Rom::load(bytes.clone()).expect("load");
+    assert_eq!(status(&bytes), Status::Original);
     let out = patch(&rom, &PatchOptions::default(), &mut |_| {}).expect("patch");
     assert_eq!(out.report.runtime_language, RuntimeLanguage::Added);
     assert_eq!(status(&out.bytes), Status::Applied);
@@ -408,7 +496,12 @@ fn latin_codes_match_the_game_font() {
     };
     let rom = Rom::load(bytes).expect("load");
     let zh = rom.table(rom.info().zh_table).unwrap();
-    assert_eq!(describe(&Charset::standard(), &zh.strings[4]), "HOSPITAL");
+    let (index, text) = if rom.info().edition_name() == Some("My Lab") {
+        (90, "ENGLISH")
+    } else {
+        (4, "HOSPITAL")
+    };
+    assert_eq!(describe(&Charset::standard(), &zh.strings[index]), text);
 }
 
 #[test]
@@ -420,7 +513,12 @@ fn mapping_is_applied_and_verified() {
         return;
     };
     let rom = Rom::load(bytes.clone()).expect("load");
-    let mapping = Mapping::parse(r#"{"拓麻": "Tama", "小游戏": "小遊戲", "没有": "x"}"#).unwrap();
+    let (rules, index, replacement) = if rom.info().edition_name() == Some("My Lab") {
+        (r#"{"^孵化$": "Hatch", "ZZZZZZZZZZZZ": "x"}"#, 4, "Hatch")
+    } else {
+        (r#"{"拓麻": "Tama", "小游戏": "小遊戲", "没有": "x"}"#, 9, "Tama")
+    };
+    let mapping = Mapping::parse(rules).unwrap();
     let opts = PatchOptions {
         mapping: Some(mapping.clone()),
         ..PatchOptions::default()
@@ -440,8 +538,8 @@ fn mapping_is_applied_and_verified() {
     assert!(!verify(&bytes, &out.bytes).unwrap().is_empty());
     let after = Rom::load(out.bytes).unwrap();
     let zh = after.table(after.info().zh_table).unwrap();
-    let tama: Vec<u16> = "Tama".chars().map(|c| latin_code(c).unwrap()).collect();
-    assert_eq!(zh.strings[9][..4], tama[..]);
+    let expected: Vec<u16> = replacement.chars().map(|c| latin_code(c).unwrap()).collect();
+    assert!(zh.strings[index].starts_with(&expected));
 }
 
 #[test]

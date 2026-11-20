@@ -405,9 +405,9 @@ impl App {
     fn rom_section(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         ui.heading("1. Your ROM");
         ui.label(if platform::IS_WEB {
-            "Use your own Tamagotchi Paradise ROM (.bin). Drop a file here or browse. The ROM is processed inside your browser and is never uploaded."
+            "Use your own Tamagotchi Paradise or My Lab ROM (.bin). Drop a file here or browse. The ROM is processed inside your browser and is never uploaded."
         } else {
-            "Use your own Tamagotchi Paradise ROM (.bin). Drop a file here or browse. The original file is never modified."
+            "Use your own Tamagotchi Paradise or My Lab ROM (.bin). Drop a file here or browse. The original file is never modified."
         });
         ui.horizontal_wrapped(|ui| {
             if ui.button("Browse...").clicked() {
@@ -626,6 +626,11 @@ impl App {
             ui.label("Strings changed");
             ui.label(format!("{} of {}", s.strings_changed, s.strings_total));
             ui.end_row();
+            if let Some(startup) = &r.startup {
+                ui.label("Startup strings changed");
+                ui.label(format!("{} of {}", startup.stats.strings_changed, startup.stats.strings_total));
+                ui.end_row();
+            }
             ui.label("Characters converted");
             ui.label(s.chars_converted.to_string());
             ui.end_row();
@@ -692,24 +697,31 @@ impl App {
                 format!("Mapping keys that matched nothing: {}", unused.join(", ")),
             );
         }
-        if r.unresolved.is_empty() && r.remaining_simplified.is_empty() {
-            ui.label("Every Simplified character was converted.");
+        let reports = std::iter::once(("", r)).chain(
+            r.startup.as_deref().map(|report| ("Startup: ", report)),
+        );
+        if reports.clone().all(|(_, report)| {
+            report.unresolved.is_empty() && report.remaining_simplified.is_empty()
+        }) {
+            ui.label("Every Simplified character in the converted tables was converted.");
         }
-        if !r.unresolved.is_empty() {
-            ui.colored_label(egui::Color32::YELLOW, "Could not convert:");
-            for u in &r.unresolved {
-                ui.label(show_text(&format!(
-                    "{} -> {} x{} ({})",
-                    u.source, u.target, u.count, u.reason
-                )));
+        for (prefix, report) in reports {
+            if !report.unresolved.is_empty() {
+                ui.colored_label(egui::Color32::YELLOW, format!("{prefix}Could not convert:"));
+                for u in &report.unresolved {
+                    ui.label(show_text(&format!(
+                        "{} -> {} x{} ({})",
+                        u.source, u.target, u.count, u.reason
+                    )));
+                }
             }
-        }
-        if !r.remaining_simplified.is_empty() {
-            let list: String = r.remaining_simplified.iter().map(|(c, _)| *c).collect();
-            ui.colored_label(
-                egui::Color32::YELLOW,
-                format!("Simplified characters left: {}", show_text(&list)),
-            );
+            if !report.remaining_simplified.is_empty() {
+                let list: String = report.remaining_simplified.iter().map(|(c, _)| *c).collect();
+                ui.colored_label(
+                    egui::Color32::YELLOW,
+                    format!("{prefix}Simplified characters left: {}", show_text(&list)),
+                );
+            }
         }
     }
 

@@ -2,14 +2,14 @@
 
 https://github.com/user-attachments/assets/d334540c-14fb-4485-b4cc-196fc8aa19d5
 
-Converts the Simplified Chinese text and font in your own Tamagotchi Paradise ROM (`.bin`) to Traditional Chinese (Hong Kong by default) and writes a new ROM. No ROM or firmware is included or distributed; you supply your own dump.
+Converts the Simplified Chinese text and font in your own Tamagotchi Paradise or My Lab ROM (`.bin`) to Traditional Chinese (Hong Kong by default) and writes a new ROM. No ROM or firmware is included or distributed; you supply your own dump.
 The original file is never modified.
 
 You can use the web version (wasm) here: https://paradise-zh-patcher.void-dojo.workers.dev/ or desktop app.
 
 ## What it does
 
-- Converts every Chinese string in the ROM with OpenCC and rebuilds the archives (lengths, offsets, checksums), then verifies the result before writing.
+- Converts Chinese interface strings with OpenCC and rebuilds the archives (lengths, offsets, checksums), then verifies the result before writing.
 - Gives each converted character a glyph:
   - An existing glyph is reused when the game's font already has the Traditional character.
   - Simplified-only characters (个, 们, 国) are redrawn in place.
@@ -91,6 +91,12 @@ Neon Planets (Edition 7) uses XOR-obfuscated LZ4 font blocks. On this edition, a
 See [Paramix compatibility and validation](docs/paramix-compatibility.md) for the
 workflow, helper formats and integration tests. These changes are included in
 builds from this branch; the upstream hosted web app is not updated by this fork.
+
+## My Lab
+
+The patcher accepts My Lab U2 dumps. It converts the Chinese tables and fonts for the main interface and the separate startup and updater interface. The CLI `strings` command lists both tables by section and the conversion report includes both. Preview, mapping export and custom mappings use the main table. Transferable toy, accessory and food packages retain the original string codes for the receiving device.
+
+On supported My Lab v1.0.00 firmware, the runtime option adds **Language** after **Update** under **Computer > Settings**. Confirming a language updates the existing save and returns to Settings. Cancel returns to Settings with the current language. The first-run setup flow stays available on a new save.
 
 ## Verification status
 

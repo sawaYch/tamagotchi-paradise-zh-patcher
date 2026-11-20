@@ -5,6 +5,9 @@ use crate::sprite::{FontSprite, SpriteHeader, SpritePack};
 use crate::strings::StringTable;
 
 pub const ASSET_BASE: usize = 0x11_1000;
+pub(crate) const MY_LAB_BOOT_ASSET_BASE: usize = 0x5_1000;
+pub(crate) const MY_LAB_ASSET_BASE: usize = 0x21_1000;
+pub(crate) const MY_LAB_EDITION: u32 = 254;
 pub const SIGNATURE: &[u8; 8] = b"SONIXDEV";
 pub const ENTRY_DATA: usize = 0;
 pub const ENTRY_SPRITES: usize = 1;
@@ -16,6 +19,7 @@ const FREE_BYTE: u8 = 0xFF;
 pub struct RomInfo {
     pub rom_len: usize,
     pub edition: Option<u32>,
+    pub asset_base: usize,
     pub asset_len: usize,
     pub top_checksum_ok: bool,
     pub strings_checksum_ok: bool,
@@ -40,6 +44,9 @@ const EDITIONS: &[(&str, u32)] = &[
 
 impl RomInfo {
     pub fn edition_name(&self) -> Option<&'static str> {
+        if self.edition == Some(MY_LAB_EDITION) {
+            return Some("My Lab");
+        }
         self.edition
             .and_then(|id| EDITIONS.get(id.checked_sub(1)? as usize))
             .map(|&(name, _)| name)
@@ -78,9 +85,17 @@ fn detect_edition(bytes: &[u8]) -> Option<u32> {
     })
 }
 
+pub(crate) fn is_my_lab(bytes: &[u8]) -> bool {
+    const PRODUCT_ID: &[u8] = b"PSID_YD03_MYLAB_CHARA";
+    bytes.len() == 0x0100_0000
+        && bytes.starts_with(SIGNATURE)
+        && bytes[0x1F8..0x1FC] == 0x5A5A_0033u32.to_le_bytes()
+        && &bytes[0x186A40..0x186A48] == SIGNATURE
+        && &bytes[0x18B7B3..0x18B7B3 + PRODUCT_ID.len()] == PRODUCT_ID
+}
+
 pub struct Rom {
     bytes: Vec<u8>,
-    asset_len: usize,
     top: Archive,
     sprites: SpritePack,
     tables: Archive,
@@ -110,9 +125,17 @@ pub fn find_font_sprite(sprites: &SpritePack, cs: &Charset) -> Option<usize> {
 }
 
 pub fn find_zh_table(tables: &[StringTable], cs: &Charset) -> Option<usize> {
+    find_zh_table_with_minimum(tables, cs, 200)
+}
+
+fn find_zh_table_with_minimum(
+    tables: &[StringTable],
+    cs: &Charset,
+    minimum: usize,
+) -> Option<usize> {
     let counts: Vec<usize> = tables.iter().map(|t| count_hanzi_words(t, cs)).collect();
     let (idx, &best) = counts.iter().enumerate().max_by_key(|(_, &c)| c)?;
-    if best < 200 {
+    if best < minimum {
         return None;
     }
     let others_max = counts
@@ -135,20 +158,49 @@ impl Rom {
                 "file is too small to be a Paradise ROM".into(),
             ));
         }
-        let region = &bytes[ASSET_BASE..];
+        let asset_base = if is_my_lab(&bytes) {
+            MY_LAB_ASSET_BASE
+        } else {
+            ASSET_BASE
+        };
+        Self::load_archive(bytes, asset_base)
+    }
+
+    /// My Lab's independent startup interface, with its own strings and font.
+    pub fn startup(&self) -> Result<Option<Rom>> {
+        (self.info.asset_base == MY_LAB_ASSET_BASE)
+            .then(|| Self::load_my_lab_boot(self.bytes.clone()))
+            .transpose()
+    }
+
+    pub(crate) fn load_my_lab_boot(bytes: Vec<u8>) -> Result<Rom> {
+        if !is_my_lab(&bytes) {
+            return Err(Error::Unsupported("expected a My Lab ROM".into()));
+        }
+        Self::load_archive(bytes, MY_LAB_BOOT_ASSET_BASE)
+    }
+
+    fn load_archive(bytes: Vec<u8>, asset_base: usize) -> Result<Rom> {
+        let my_lab = asset_base != ASSET_BASE;
+        let entry_count = if asset_base == MY_LAB_ASSET_BASE {
+            24
+        } else {
+            3
+        };
+        let region = &bytes[asset_base..];
         if region.len() < 4 || u32::from_le_bytes(region[0..4].try_into().unwrap()) != arc::MAGIC {
             return Err(Error::Unsupported(format!(
-                "no ARC2 asset archive at 0x{ASSET_BASE:x}"
+                "no ARC2 asset archive at 0x{asset_base:x}"
             )));
         }
         let asset_len = arc::total_len(region)?;
-        if ASSET_BASE + asset_len > bytes.len() {
+        if asset_len > region.len() {
             return fmt_err("asset archive extends past end of file");
         }
         let top = Archive::parse(region)?;
-        if top.files.len() != 3 {
+        if top.files.len() != entry_count {
             return Err(Error::Unsupported(format!(
-                "expected 3 top-level archive entries, found {}",
+                "expected {entry_count} top-level archive entries, found {}",
                 top.files.len()
             )));
         }
@@ -167,7 +219,12 @@ impl Rom {
             .iter()
             .map(|f| StringTable::parse(&f.data))
             .collect::<Result<_>>()?;
-        let zh_table = find_zh_table(&parsed, &cs).ok_or_else(|| {
+        let minimum = if asset_base == MY_LAB_BOOT_ASSET_BASE {
+            100
+        } else {
+            200
+        };
+        let zh_table = find_zh_table_with_minimum(&parsed, &cs, minimum).ok_or_else(|| {
             Error::Unsupported("could not identify the Chinese string table".into())
         })?;
         let font_sprite = find_font_sprite(&sprites, &cs)
@@ -182,7 +239,12 @@ impl Rom {
         }
         let info = RomInfo {
             rom_len: bytes.len(),
-            edition: detect_edition(&bytes),
+            edition: if my_lab {
+                Some(MY_LAB_EDITION)
+            } else {
+                detect_edition(&bytes)
+            },
+            asset_base,
             asset_len,
             top_checksum_ok: arc::checksum_ok(region),
             strings_checksum_ok: arc::checksum_ok(strings_data),
@@ -196,7 +258,6 @@ impl Rom {
         };
         Ok(Rom {
             bytes,
-            asset_len,
             top,
             sprites,
             tables,
@@ -210,8 +271,10 @@ impl Rom {
 
     /// Transplanted Neon item count and whether the Chinese names were converted.
     pub fn neon_items(&self) -> Result<Option<(usize, bool)>> {
-        Ok(crate::neon_names::item_names(self, self.info.zh_string_count)?
-            .map(|(names, translated)| (names.len(), translated)))
+        Ok(
+            crate::neon_names::item_names(self, self.info.zh_string_count)?
+                .map(|(names, translated)| (names.len(), translated)),
+        )
     }
 
     pub fn bytes(&self) -> &[u8] {
@@ -220,6 +283,33 @@ impl Rom {
 
     pub fn data_pack(&self) -> &[u8] {
         &self.top.files[ENTRY_DATA].data
+    }
+
+    pub(crate) fn other_assets(&self) -> impl Iterator<Item = &arc::ArcFile> {
+        self.top
+            .files
+            .iter()
+            .enumerate()
+            .filter_map(|(i, file)| (i != ENTRY_SPRITES && i != ENTRY_STRINGS).then_some(file))
+    }
+
+    /// My Lab includes transferable toys, accessories and meals alongside its interface.
+    /// The receiver uses its own font. Reserve the original codes, also used by
+    /// the package tables, when allocating glyph slots for the local interface.
+    pub(crate) fn extra_language_tables(&self) -> Result<Vec<StringTable>> {
+        let mut tables = Vec::new();
+        for entry in &self.top.files[3..] {
+            for package in Archive::parse(&entry.data)?.files {
+                let package = Archive::parse(&package.data)?;
+                let Some(strings) = package.files.get(ENTRY_STRINGS) else {
+                    return fmt_err("missing string archive in My Lab package");
+                };
+                for table in Archive::parse(&strings.data)?.files {
+                    tables.push(StringTable::parse(&table.data)?);
+                }
+            }
+        }
+        Ok(tables)
     }
 
     pub fn sprite_blobs(&self) -> &[Vec<u8>] {
@@ -257,23 +347,31 @@ impl Rom {
         top.files[ENTRY_SPRITES].data = self.sprites.build();
         let mut new_asset = top.build();
         let mut out = self.bytes.clone();
-        let old_end = ASSET_BASE + self.asset_len;
-        let new_end = ASSET_BASE + new_asset.len();
+        let base = self.info.asset_base;
+        let old_end = base + self.info.asset_len;
+        let new_end = base + new_asset.len();
         if new_end > out.len() {
             return Err(Error::Capacity(
                 "patched assets would exceed the ROM size".into(),
             ));
         }
-        crate::paramix::guard_growth(&self.bytes, old_end, new_end)?;
-        if new_end > old_end && out[old_end..new_end].iter().any(|&b| b != FREE_BYTE) {
+        let free_byte = if self.info.edition == Some(MY_LAB_EDITION) {
+            0
+        } else {
+            crate::paramix::guard_growth(&self.bytes, old_end, new_end)?;
+            FREE_BYTE
+        };
+        if new_end > old_end && out[old_end..new_end].iter().any(|&b| b != free_byte) {
             return Err(Error::Capacity(
                 "patched assets would overwrite non-empty flash after the archive".into(),
             ));
         }
-        crate::six_rain::relocate(&self.bytes, &mut new_asset)?;
-        out[ASSET_BASE..new_end].copy_from_slice(&new_asset);
+        if base == ASSET_BASE {
+            crate::six_rain::relocate(&self.bytes, &mut new_asset)?;
+        }
+        out[base..new_end].copy_from_slice(&new_asset);
         if new_end < old_end {
-            out[new_end..old_end].fill(FREE_BYTE);
+            out[new_end..old_end].fill(free_byte);
         }
         Ok(out)
     }
@@ -286,6 +384,6 @@ impl Rom {
     }
 
     pub fn original_asset_len(&self) -> usize {
-        self.asset_len
+        self.info.asset_len
     }
 }

@@ -16,3 +16,4 @@ pub mod strings;
 pub use error::{Error, Result};
 mod six_rain;
 mod neon_names;
+mod my_lab_language;

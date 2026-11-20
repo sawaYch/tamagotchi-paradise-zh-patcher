@@ -8,7 +8,7 @@ use crate::error::{Error, Result};
 use crate::glyphpack::{FontChoice, GlyphPack};
 use crate::mapping::Mapping;
 use crate::plan::{build_plan, GlyphEdit, Plan, PlanInput, PlanStats, SlotKind, Unresolved};
-use crate::rom::Rom;
+use crate::rom::{Rom, MY_LAB_ASSET_BASE, MY_LAB_BOOT_ASSET_BASE, MY_LAB_EDITION};
 use crate::runtime_lang::{self, Status};
 use crate::sprite::{FontSprite, FOREGROUND};
 use crate::strings::StringTable;
@@ -62,6 +62,8 @@ pub struct PatchReport {
     /// Each mapping key with the number of times it matched.
     pub mapping_hits: Vec<(String, usize)>,
     pub runtime_language: RuntimeLanguage,
+    /// Separate text and font conversion performed on the My Lab startup archive.
+    pub startup: Option<Box<PatchReport>>,
 }
 
 pub struct Patched {
@@ -217,6 +219,23 @@ fn append_settings_label(tables: &mut [StringTable], labels: Vec<Vec<u16>>) -> R
 }
 
 pub fn patch(rom: &Rom, opts: &PatchOptions, progress: &mut dyn FnMut(&str)) -> Result<Patched> {
+    let mut output = patch_archive(rom, opts, progress)?;
+    if rom.info().asset_base == MY_LAB_ASSET_BASE {
+        progress("Patching My Lab startup assets");
+        let boot = Rom::load_my_lab_boot(output.bytes)?;
+        // Mapping IDs exported by the UI and CLI refer only to the main archive.
+        let boot_opts = PatchOptions {
+            mapping: None,
+            ..opts.clone()
+        };
+        let startup = patch_archive(&boot, &boot_opts, progress)?;
+        output.bytes = startup.bytes;
+        output.report.startup = Some(Box::new(startup.report));
+    }
+    Ok(output)
+}
+
+fn patch_archive(rom: &Rom, opts: &PatchOptions, progress: &mut dyn FnMut(&str)) -> Result<Patched> {
     let cs = Charset::standard();
     let pack = GlyphPack::for_font(opts.font, opts.variant);
     let info = rom.info();
@@ -230,13 +249,21 @@ pub fn patch(rom: &Rom, opts: &PatchOptions, progress: &mut dyn FnMut(&str)) -> 
     let same_len = tables
         .iter()
         .all(|t| t.strings.len() == tables[0].strings.len());
-    let runtime = match (opts.runtime_language, runtime_lang::status(rom.bytes())) {
+    let startup_archive = info.asset_base == MY_LAB_BOOT_ASSET_BASE;
+    let runtime_status = if startup_archive {
+        Status::Unsupported
+    } else {
+        runtime_lang::status(rom.bytes())
+    };
+    let runtime = match (opts.runtime_language, runtime_status) {
         (false, _) => RuntimeLanguage::Disabled,
         (true, Status::Applied) => RuntimeLanguage::AlreadyPresent,
         (true, Status::Original) if same_len => RuntimeLanguage::Added,
         (true, _) => RuntimeLanguage::Unsupported,
     };
-    let existing = runtime_lang::settings_labels(rom.bytes());
+    let existing = (!startup_archive)
+        .then(|| runtime_lang::settings_labels(rom.bytes()))
+        .flatten();
     let mut language_label = existing.as_ref().and_then(|s| s.language);
     let mut paramix_label = existing.as_ref().and_then(|s| s.paramix);
     for index in [language_label, paramix_label].into_iter().flatten() {
@@ -255,6 +282,7 @@ pub fn patch(rom: &Rom, opts: &PatchOptions, progress: &mut dyn FnMut(&str)) -> 
         settings_changed = true;
     }
     if opts.runtime_language
+        && info.edition != Some(MY_LAB_EDITION)
         && runtime != RuntimeLanguage::Unsupported
         && paramix_label.is_none()
         && crate::paramix::requested_shortcut_stub(rom.bytes())?.is_some()
@@ -271,15 +299,18 @@ pub fn patch(rom: &Rom, opts: &PatchOptions, progress: &mut dyn FnMut(&str)) -> 
     let zh = &tables[info.zh_table];
     let pending_names = crate::neon_names::pending(rom, zh.strings.len())?;
     let awaits_translation = |index| pending_names.iter().any(|range| range.contains(&index));
+    let extra_tables = rom.extra_language_tables()?;
     let others: Vec<&StringTable> = tables
         .iter()
         .enumerate()
         .filter(|(i, _)| *i != info.zh_table)
         .map(|(_, t)| t)
+        .chain(&extra_tables)
         .collect();
 
     progress("Converting text and planning glyphs");
-    let repatch = font.uses_legacy_lz4() && already_traditional(&tables, info.zh_table, &cs);
+    let repatch = (font.uses_legacy_lz4() || info.edition == Some(MY_LAB_EDITION))
+        && already_traditional(&tables, info.zh_table, &cs);
     if repatch && pending_names.is_empty() && opts.mapping.as_ref().is_some_and(|m| !m.is_empty()) {
         return Err(Error::Unsupported(
             "text mappings need the pre-translation ROM because an existing patch reuses glyph codes; font changes can use this ROM directly".into(),
@@ -371,7 +402,7 @@ pub fn patch(rom: &Rom, opts: &PatchOptions, progress: &mut dyn FnMut(&str)) -> 
     )?;
 
     progress("Rebuilding assets");
-    let mut patched = Rom::load(rom.bytes().to_vec())?;
+    let mut patched = load_matching_archive(rom, rom.bytes().to_vec())?;
     patched.set_table(info.zh_table, &plan.table);
     for (i, t) in tables.iter_mut().enumerate() {
         if i == info.zh_table {
@@ -428,17 +459,18 @@ pub fn patch(rom: &Rom, opts: &PatchOptions, progress: &mut dyn FnMut(&str)) -> 
         mapping_hits: conv.mapping_hits(),
         font_grew: font.grew(),
         runtime_language: runtime,
+        startup: None,
     };
 
     progress("Verifying output");
-    let mut issues = verify_with(rom.bytes(), &bytes, opts.mapping.as_ref())?;
+    let after = load_matching_archive(rom, bytes.clone())?;
+    let mut issues = verify_archive(rom, &after, opts.mapping.as_ref())?;
     let allowed: std::collections::HashSet<usize> = report
         .edits
         .iter()
         .map(|e| Charset::glyph_of_code(e.code))
         .chain(latin_glyphs)
         .collect();
-    let after = Rom::load(bytes.clone())?;
     let stray = changed_glyphs(rom, &after)?
         .into_iter()
         .filter(|g| !allowed.contains(g))
@@ -469,6 +501,38 @@ pub fn verify_with(
         Ok(b) => b,
         Err(e) => return Ok(vec![format!("patched ROM does not parse: {e}")]),
     };
+    if a.info().asset_base == MY_LAB_ASSET_BASE && b.info().asset_base == MY_LAB_ASSET_BASE {
+        // Keep the supported Settings changes in the main comparison. Only
+        // mask the startup archive, which has its own text and font comparison.
+        let original_boot = Rom::load_my_lab_boot(original.to_vec())?;
+        let after_boot = match Rom::load_my_lab_boot(patched.to_vec()) {
+            Ok(rom) => rom,
+            Err(e) => return Ok(vec![format!("patched My Lab startup archive does not parse: {e}")]),
+        };
+        let boot_end = MY_LAB_BOOT_ASSET_BASE
+            + original_boot.info().asset_len.max(after_boot.info().asset_len);
+        let boot_range = MY_LAB_BOOT_ASSET_BASE..boot_end;
+        let mut main_only = patched.to_vec();
+        main_only[boot_range.clone()].copy_from_slice(&original[boot_range]);
+        let main_only = Rom::load(main_only)?;
+        let mut issues = verify_archive(&a, &main_only, mapping)?;
+        let before_boot = Rom::load_my_lab_boot(main_only.bytes().to_vec())?;
+        issues.extend(verify_archive(&before_boot, &after_boot, None)?);
+        return Ok(issues);
+    }
+    verify_archive(&a, &b, mapping)
+}
+
+fn load_matching_archive(rom: &Rom, bytes: Vec<u8>) -> Result<Rom> {
+    if rom.info().asset_base == MY_LAB_BOOT_ASSET_BASE {
+        Rom::load_my_lab_boot(bytes)
+    } else {
+        Rom::load(bytes)
+    }
+}
+
+fn verify_archive(a: &Rom, b: &Rom, mapping: Option<&Mapping>) -> Result<Vec<String>> {
+    let (original, patched) = (a.bytes(), b.bytes());
     let cs = Charset::standard();
     let mut issues = Vec::new();
     let (ia, ib) = (a.info(), b.info());
@@ -479,9 +543,18 @@ pub fn verify_with(
     if !ib.top_checksum_ok || !ib.strings_checksum_ok {
         issues.push("archive checksum mismatch".into());
     }
+    if ia.asset_base != ib.asset_base {
+        issues.push("asset archive location changed".into());
+        return Ok(issues);
+    }
     let (ta, tb) = (a.all_tables()?, b.all_tables()?);
-    let original_settings = runtime_lang::settings_labels(original);
-    let patched_settings = runtime_lang::settings_labels(patched);
+    let settings = |bytes| {
+        (ia.asset_base != MY_LAB_BOOT_ASSET_BASE)
+            .then(|| runtime_lang::settings_labels(bytes))
+            .flatten()
+    };
+    let original_settings = settings(original);
+    let patched_settings = settings(patched);
     let original_language = original_settings.as_ref().and_then(|s| s.language);
     let patched_language = patched_settings.as_ref().and_then(|s| s.language);
     let original_paramix = original_settings.as_ref().and_then(|s| s.paramix);
@@ -514,11 +587,9 @@ pub fn verify_with(
             issues.push("Settings helper refers to a missing string label".into());
         }
     }
-    let head = crate::rom::ASSET_BASE
-        .min(original.len())
-        .min(patched.len());
+    let head = ia.asset_base;
     let mut expected_head = original.to_vec();
-    let original_pending = crate::neon_names::pending(&a, ta[ia.zh_table].strings.len())?;
+    let original_pending = crate::neon_names::pending(a, ta[ia.zh_table].strings.len())?;
     if !original_pending.is_empty() && crate::neon_names::converted(patched) {
         crate::neon_names::mark_converted(&mut expected_head);
     }
@@ -530,7 +601,7 @@ pub fn verify_with(
     if expected_head[..head] != patched[..head] {
         issues.push("data before the asset archive changed".into());
     }
-    let tail = (crate::rom::ASSET_BASE + ia.asset_len.max(ib.asset_len)).min(original.len());
+    let tail = (ia.asset_base + ia.asset_len.max(ib.asset_len)).min(original.len());
     if original.len() == patched.len() && original[tail..] != patched[tail..] {
         issues.push("data after the asset archive changed".into());
     }
@@ -542,15 +613,23 @@ pub fn verify_with(
     {
         issues.push("font extent changed with an installed Paramix catalog".into());
     }
-    if a.data_pack() != b.data_pack() {
-        issues.push("data pack changed".into());
+    if a.other_assets().ne(b.other_assets()) {
+        issues.push("unrelated asset archive entries changed".into());
     }
-    let original_archive = &patched[crate::rom::ASSET_BASE..crate::rom::ASSET_BASE + ib.asset_len];
-    let mut repaired = original_archive.to_vec();
-    let rain_sites = crate::six_rain::relocate(original, &mut repaired)?;
-    if !rain_sites.is_empty() && repaired != original_archive {
-        issues.push("external SIXB rain pointers do not match the rebuilt archive".into());
+    if ia.sprite_count != ib.sprite_count {
+        issues.push("sprite count changed".into());
     }
+    let original_archive = &patched[ib.asset_base..ib.asset_base + ib.asset_len];
+    let rain_sites = if ia.edition == Some(MY_LAB_EDITION) {
+        Default::default()
+    } else {
+        let mut repaired = original_archive.to_vec();
+        let sites = crate::six_rain::relocate(original, &mut repaired)?;
+        if !sites.is_empty() && repaired != original_archive {
+            issues.push("external SIXB rain pointers do not match the rebuilt archive".into());
+        }
+        sites
+    };
     for (i, (x, y)) in a.sprite_blobs().iter().zip(b.sprite_blobs()).enumerate() {
         if i != ia.font_sprite && x != y {
             let mut expected = x.clone();

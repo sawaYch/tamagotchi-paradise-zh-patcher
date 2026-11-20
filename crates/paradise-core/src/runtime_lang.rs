@@ -13,6 +13,7 @@
 
 use crate::charset::Charset;
 use crate::error::{Error, Result};
+use crate::{my_lab_language, rom};
 
 const FREE_AT: usize = 0xB6000;
 const FREE_LEN: usize = 0x80;
@@ -526,10 +527,25 @@ fn settings_info(bytes: &[u8]) -> Option<SettingsInfo> {
 }
 
 pub fn settings_labels(bytes: &[u8]) -> Option<SettingsLabels> {
+    if rom::is_my_lab(bytes) {
+        return my_lab_language::applied_label(bytes).map(|label| SettingsLabels {
+            language: Some(label),
+            paramix: None,
+        });
+    }
     settings_info(bytes).map(|i| i.labels)
 }
 
 pub fn status(bytes: &[u8]) -> Status {
+    if rom::is_my_lab(bytes) {
+        return if my_lab_language::applied_label(bytes).is_some() {
+            Status::Applied
+        } else if my_lab_language::is_original(bytes) {
+            Status::Original
+        } else {
+            Status::Unsupported
+        };
+    }
     if let Some(i) = settings_info(bytes) {
         return if i.labels.language.is_some() {
             Status::Applied
@@ -545,10 +561,13 @@ pub fn status(bytes: &[u8]) -> Status {
 }
 
 pub fn helper_page(bytes: &[u8]) -> Option<usize> {
+    if rom::is_my_lab(bytes) {
+        return my_lab_language::applied_label(bytes).map(|_| my_lab_language::HELPER_PAGE);
+    }
     settings_info(bytes).map(|i| i.base)
 }
 pub fn applied_label(bytes: &[u8]) -> Option<u32> {
-    settings_info(bytes).and_then(|i| i.labels.language)
+    settings_labels(bytes).and_then(|labels| labels.language)
 }
 
 fn available(bytes: &[u8], base: usize) -> Result<bool> {
@@ -671,6 +690,12 @@ fn apply_complete(
 /// Merge independent Language/PARAMIX rows. None preserves an existing row;
 /// this API never silently removes either feature or rewrites an existing label.
 pub fn apply_shared(bytes: &mut [u8], language: Option<u32>, paramix: Option<u32>) -> Result<()> {
+    if rom::is_my_lab(bytes) {
+        if let (Some(label), None) = (language, paramix) {
+            return my_lab_language::apply(bytes, label);
+        }
+        return Err(Error::Unsupported("My Lab only supports the Settings Language entry".into()));
+    }
     let prior = settings_info(bytes);
     let old = prior.map(|i| i.labels).unwrap_or(SettingsLabels {
         language: None,
@@ -713,6 +738,11 @@ pub fn apply_at(bytes: &mut [u8], label_index: u32, base: usize) -> Result<()> {
 }
 
 pub fn reproduce_settings(bytes: &mut [u8], patched: &[u8]) -> Result<()> {
+    if rom::is_my_lab(bytes) && rom::is_my_lab(patched) {
+        let label = my_lab_language::applied_label(patched)
+            .ok_or_else(|| Error::Verify("My Lab Settings helper metadata/code is invalid".into()))?;
+        return my_lab_language::apply(bytes, label);
+    }
     let info = settings_info(patched)
         .ok_or_else(|| Error::Verify("Settings helper metadata/code is invalid".into()))?;
     apply_complete(bytes, info.labels, Some(info.base), info.format)
