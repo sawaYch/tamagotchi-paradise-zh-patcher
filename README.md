@@ -76,7 +76,7 @@ https://github.com/user-attachments/assets/6a458ff1-11af-445e-888a-6f51d9bf7949
 
 The firmware only offers the language screen on first boot. The patcher adds a "Language" entry (語言) as the fourth item of the Settings menu. Choosing a language there applies it immediately and returns to Settings, without repeating the first-boot date, birthday and planet-name screens. The Chinese entry in the language list is renamed from 中文（简体） to 中文（繁體）.
 
-How it works: the patch moves the Settings menu table into unused flash, adds an entry that opens the existing language scene, appends a localized "language" label to every string table, and makes the language scene return to where it was opened from. It changes executable code, so it only applies to known firmware builds (Neon Planet, Glacier, Tropical, Jade Forest, Sky, Water and Land); otherwise it is skipped and reported. Disable it with `--no-runtime-language` or the GUI checkbox.
+How it works: the patch moves the Settings menu table into unused flash, adds an entry that opens the existing language scene, appends a localized "language" label to every string table, and makes the language scene return to where it was opened from. It changes executable code, so it only applies to known firmware builds (Neon Planets, Glacier, Tropical, Jade Forest, Sky, Water and Land); otherwise it is skipped and reported. Disable it with `--no-runtime-language` or the GUI checkbox.
 
 ## Paramix Studio compatibility
 
@@ -86,7 +86,7 @@ checked against Paramix menu code, catalogs, stored saves and reserved pool page
 even when those pages are erased. The runtime Language entry uses a separately
 reserved page and supports compatible existing helper versions.
 
-Neon Planet (Edition 7) uses XOR-obfuscated LZ4 font blocks. On this edition, a font that needs extra space can grow if the ROM has no installed Paramix sprite catalog and there is room after its assets. The default Cubic 11 fits the existing size. Its native 22 mission descriptions use the same language tables, so conversion preserves their order, progress, and reward data.
+Neon Planets (Edition 7) uses XOR-obfuscated LZ4 font blocks. On this edition, a font that needs extra space can grow if the ROM has no installed Paramix sprite catalog and there is room after its assets. The default Cubic 11 fits the existing size. Its native 22 mission descriptions use the same language tables, so conversion preserves their order, progress, and reward data.
 
 See [Paramix compatibility and validation](docs/paramix-compatibility.md) for the
 workflow, helper formats and integration tests. These changes are included in

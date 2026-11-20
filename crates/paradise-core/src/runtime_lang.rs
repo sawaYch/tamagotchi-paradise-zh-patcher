@@ -97,7 +97,7 @@ const PROFILES: [Profile; 4] = [
         scene_datetime: 107,
         inline_set_scene: false,
     },
-    // Neon Planet
+    // Neon Planets
     Profile {
         page1_table: 0xA6A4C,
         page1_original: [28, 73, 0, 27, 74, 0, 26, 0, 0],

@@ -62,7 +62,7 @@ fn patch_produces_valid_rom() {
     assert_ne!(out.bytes, bytes);
     let again = Rom::load(out.bytes.clone()).expect("reload");
     if rom.info().edition == Some(7) {
-        assert_eq!(rom.info().edition_name(), Some("Neon Planet"));
+        assert_eq!(rom.info().edition_name(), Some("Neon Planets"));
         assert_eq!(rom.info().zh_string_count, 1022);
         assert_eq!(rom.info().font_sprite, 19);
         let cs = Charset::standard();

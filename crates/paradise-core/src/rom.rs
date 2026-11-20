@@ -35,7 +35,7 @@ const EDITIONS: &[(&str, u32)] = &[
     ("Jade Forest", 0x8496_33DB),
     ("Tropical", 0x96CB_83B8),
     ("Glacier", 0x96CB_83B8),
-    ("Neon Planet", 0x9943_1749),
+    ("Neon Planets", 0x9943_1749),
 ];
 
 impl RomInfo {
