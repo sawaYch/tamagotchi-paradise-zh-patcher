@@ -106,9 +106,7 @@ impl FontChoice {
             FontChoice::FusionPixel => "https://github.com/TakWolf/fusion-pixel-font",
             FontChoice::ArkPixel => "https://github.com/TakWolf/ark-pixel-font",
             FontChoice::Cubic11 => "https://github.com/ACh-K/Cubic-11",
-            FontChoice::Mona12 | FontChoice::Mona12Bold => {
-                "https://github.com/MonadABXY/mona-font"
-            }
+            FontChoice::Mona12 | FontChoice::Mona12Bold => "https://github.com/MonadABXY/mona-font",
             FontChoice::Zpix => "https://github.com/SolidZORO/zpix-pixel-font",
             FontChoice::RoundPix12 => "https://github.com/Astro-2539/ZLabs-RoundPix-12px",
             FontChoice::Unifont => "https://unifoundry.com/unifont/",
@@ -322,6 +320,13 @@ impl GlyphPack {
         }
         Some(px)
     }
+
+    pub(crate) fn bitmaps(&self) -> impl Iterator<Item = (char, [u8; BITMAP_BYTES])> + '_ {
+        self.codes
+            .iter()
+            .zip(self.bitmaps.chunks_exact(BITMAP_BYTES))
+            .filter_map(|(&c, bitmap)| Some((char::from_u32(c.into())?, bitmap.try_into().ok()?)))
+    }
 }
 
 #[cfg(test)]
@@ -357,9 +362,7 @@ mod tests {
 
     #[test]
     fn every_font_has_latin_glyphs_centered_in_the_advance() {
-        let chars = || {
-            (' '..='z').filter(|&c| c != ' ' && crate::charset::latin_code(c).is_some())
-        };
+        let chars = || (' '..='z').filter(|&c| c != ' ' && crate::charset::latin_code(c).is_some());
         assert_eq!(chars().count(), 67);
         for font in FontChoice::ALL {
             let p = GlyphPack::latin_for(font);
@@ -372,7 +375,10 @@ mod tests {
                 let (lo, hi) = (cols[0], cols[cols.len() - 1]);
                 let width = hi - lo + 1;
                 if width <= LATIN_ADVANCE {
-                    assert!(lo >= LATIN_LEFT && hi < LATIN_LEFT + LATIN_ADVANCE, "{font:?} {c}");
+                    assert!(
+                        lo >= LATIN_LEFT && hi < LATIN_LEFT + LATIN_ADVANCE,
+                        "{font:?} {c}"
+                    );
                 }
             }
         }

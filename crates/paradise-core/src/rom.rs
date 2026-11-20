@@ -15,6 +15,7 @@ const FREE_BYTE: u8 = 0xFF;
 #[derive(Debug, Clone)]
 pub struct RomInfo {
     pub rom_len: usize,
+    pub edition: Option<u32>,
     pub asset_len: usize,
     pub top_checksum_ok: bool,
     pub strings_checksum_ok: bool,
@@ -25,6 +26,45 @@ pub struct RomInfo {
     pub zh_string_count: usize,
     pub zh_hanzi_distinct: usize,
     pub signature_ok: bool,
+}
+
+const EDITIONS: &[(&str, u32)] = &[
+    ("Land", 0x7016_9E2C),
+    ("Water", 0x7016_9E2C),
+    ("Sky", 0x7016_9E2C),
+    ("Jade Forest", 0x8496_33DB),
+    ("Tropical", 0x96CB_83B8),
+    ("Glacier", 0x96CB_83B8),
+    ("Neon Planet", 0x9943_1749),
+];
+
+impl RomInfo {
+    pub fn edition_name(&self) -> Option<&'static str> {
+        self.edition
+            .and_then(|id| EDITIONS.get(id.checked_sub(1)? as usize))
+            .map(|&(name, _)| name)
+    }
+}
+
+fn detect_edition(bytes: &[u8]) -> Option<u32> {
+    [
+        (0xD85000, 7..=7),
+        (0xD29000, 5..=6),
+        (0xD49000, 1..=4),
+        (0xEFD000, 1..=7), // Edition page copied here by Paramix Clean ROM.
+    ]
+    .into_iter()
+    .find_map(|(at, allowed)| {
+        let page = bytes.get(at..at + 0x1000)?;
+        let word = |offset| u32::from_le_bytes(page[offset..offset + 4].try_into().unwrap());
+        let id = word(0);
+        if !allowed.contains(&id) {
+            return None;
+        }
+        let footer = word(0xFF8);
+        (footer.wrapping_add(id) == EDITIONS[id as usize - 1].1 && word(0xFFC) == !footer)
+            .then_some(id)
+    })
 }
 
 pub struct Rom {
@@ -131,6 +171,7 @@ impl Rom {
         }
         let info = RomInfo {
             rom_len: bytes.len(),
+            edition: detect_edition(&bytes),
             asset_len,
             top_checksum_ok: arc::checksum_ok(region),
             strings_checksum_ok: arc::checksum_ok(strings_data),
@@ -197,7 +238,7 @@ impl Rom {
         let mut top = self.top.clone();
         top.files[ENTRY_STRINGS].data = self.tables.build();
         top.files[ENTRY_SPRITES].data = self.sprites.build();
-        let new_asset = top.build();
+        let mut new_asset = top.build();
         let mut out = self.bytes.clone();
         let old_end = ASSET_BASE + self.asset_len;
         let new_end = ASSET_BASE + new_asset.len();
@@ -212,6 +253,7 @@ impl Rom {
                 "patched assets would overwrite non-empty flash after the archive".into(),
             ));
         }
+        crate::six_rain::relocate(&self.bytes, &mut new_asset)?;
         out[ASSET_BASE..new_end].copy_from_slice(&new_asset);
         if new_end < old_end {
             out[new_end..old_end].fill(FREE_BYTE);

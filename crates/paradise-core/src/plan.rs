@@ -43,6 +43,8 @@ pub struct PlanStats {
     pub overflow: usize,
     /// Shared glyphs left in the game's own style because no spare slot was free.
     pub restyle_skipped: usize,
+    /// Existing glyphs kept because their previous character could not be recovered uniquely.
+    pub unidentified_glyphs: usize,
 }
 
 #[derive(Debug, Clone)]

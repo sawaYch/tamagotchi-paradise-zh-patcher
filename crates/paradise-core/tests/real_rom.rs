@@ -38,7 +38,8 @@ fn tables_and_font_roundtrip() {
         u32::from_le_bytes(sprite_blob[0..4].try_into().unwrap())
     );
     let zh = rom.table(rom.info().zh_table).unwrap();
-    assert_eq!(zh.strings.len(), 824);
+    assert_eq!(zh.strings.len(), rom.info().zh_string_count);
+    assert_eq!(sprite_blob, rom.sprite_blobs()[rom.info().font_sprite]);
 }
 
 #[test]
@@ -60,8 +61,113 @@ fn patch_produces_valid_rom() {
     assert!(verify(&bytes, &out.bytes).unwrap().is_empty());
     assert_ne!(out.bytes, bytes);
     let again = Rom::load(out.bytes.clone()).expect("reload");
+    if rom.info().edition == Some(7) {
+        assert_eq!(rom.info().edition_name(), Some("Neon Planet"));
+        assert_eq!(rom.info().zh_string_count, 1022);
+        assert_eq!(rom.info().font_sprite, 19);
+        let cs = Charset::standard();
+        let tables = again.all_tables().unwrap();
+        let name = &tables[rom.info().zh_table].strings[98];
+        assert_eq!(name.len(), 7);
+        assert_eq!([name[2], name[5], name[6]], [181, 182, 0]);
+        for (word, ch) in [name[0], name[1], name[3], name[4]]
+            .into_iter()
+            .zip("中文繁體".chars())
+        {
+            let rendered = r
+                .edits
+                .iter()
+                .find(|edit| edit.code == word)
+                .map(|edit| edit.ch)
+                .or_else(|| cs.char_of_code(word));
+            assert_eq!(rendered, Some(ch));
+        }
+        assert!(tables.iter().all(|t| &t.strings[98] == name));
+        assert_eq!(again.sprite_blobs()[19].len(), rom.sprite_blobs()[19].len());
+        assert_eq!(again.sprite_blobs()[19][4], 0x8f);
+    }
     let second = patch(&again, &PatchOptions::default(), &mut |_| {}).expect("repatch");
     assert!(second.report.stats.chars_changed < r.stats.chars_changed / 4 + 50);
+}
+
+#[test]
+fn neon_mission_labels_render_in_each_traditional_variant() {
+    use paradise_core::convert::{Converter, Variant};
+    use paradise_core::glyphpack::GlyphPack;
+    use paradise_core::patch::{patch, verify, PatchOptions};
+
+    let Some(bytes) = load() else { return };
+    let original = Rom::load(bytes.clone()).unwrap();
+    if original.info().edition != Some(7) {
+        return;
+    }
+    let cs = Charset::standard();
+    let original_tables = original.all_tables().unwrap();
+    let zh = original.info().zh_table;
+    // The native scene's 22 individual mission rows, using the CLI's 1-based IDs.
+    let missions = 177..=198;
+    let original_en = &original_tables[1].strings;
+    for (id, name) in [
+        (177, "TIMES YOU FED FOOD"),
+        (198, "COLORS OF TAMAS YOU HAVE RAISED"),
+    ] {
+        let actual: String = original_en[id - 1]
+            .iter()
+            .filter_map(|&code| paradise_core::charset::latin_char(code))
+            .collect();
+        assert_eq!(actual, name);
+    }
+    let before_home = paradise_core::paramix::home_menu_helper(&bytes).unwrap();
+
+    for variant in [Variant::HongKong, Variant::Taiwan, Variant::Standard] {
+        let opts = PatchOptions {
+            variant,
+            ..PatchOptions::default()
+        };
+        let patches = patch(&original, &opts, &mut |_| {}).unwrap();
+        assert!(verify(&bytes, &patches.bytes).unwrap().is_empty());
+        let converted = Rom::load(patches.bytes.clone()).unwrap();
+        let tables = converted.all_tables().unwrap();
+        let drawn = converted.font().unwrap();
+        let pack = GlyphPack::for_font(opts.font, variant);
+        let converter = Converter::new(variant).unwrap();
+
+        for id in missions.clone() {
+            let row = id - 1;
+            let expected = converter.convert_codes(&cs, id, &original_tables[zh].strings[row]);
+            let actual = &tables[zh].strings[row];
+            assert_eq!(expected.len(), actual.len(), "{variant:?} mission {id}");
+            for (token, &code) in expected.iter().zip(actual) {
+                if let Some(ch) = token.target {
+                    let edit = patches.report.edits.iter().find(|edit| edit.code == code);
+                    let rendered = edit.map(|edit| edit.ch).or_else(|| cs.char_of_code(code));
+                    assert_eq!(rendered, Some(ch), "{variant:?} mission {id}");
+                    if edit.is_some() {
+                        assert_eq!(
+                            drawn.glyph_pixels(Charset::glyph_of_code(code)),
+                            pack.render(ch).unwrap(),
+                            "{variant:?} mission {id}, glyph {ch}",
+                        );
+                    }
+                } else {
+                    assert_eq!(code, token.code, "{variant:?} mission {id}");
+                }
+            }
+            for (i, table) in tables.iter().enumerate().filter(|(i, _)| *i != zh) {
+                assert_eq!(table.strings[row], original_tables[i].strings[row]);
+            }
+        }
+
+        assert_eq!(converted.data_pack(), original.data_pack());
+        assert_eq!(
+            &patches.bytes[0xD85000..0xF00000],
+            &bytes[0xD85000..0xF00000]
+        );
+        assert_eq!(
+            paradise_core::paramix::home_menu_helper(&patches.bytes).unwrap(),
+            before_home,
+        );
+    }
 }
 
 #[test]

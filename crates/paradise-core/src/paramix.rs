@@ -41,29 +41,98 @@ fn thumb_branch(from: usize, to: usize, link: bool) -> [u8; 4] {
     let lo = (if link { 0xD000 } else { 0x9000 }) | (j1 << 13) | (j2 << 11) | (off >> 1 & 2047);
     [hi as u8, (hi >> 8) as u8, lo as u8, (lo >> 8) as u8]
 }
+struct HomeProfile {
+    init: usize,
+    select: usize,
+    scene: usize,
+    table: usize,
+    pool: usize,
+    allocator: usize,
+    scenes: &'static [u32],
+}
+
+const HOME_PROFILES: [HomeProfile; 4] = [
+    HomeProfile {
+        init: 0x4C436,
+        select: 0x4C7C2,
+        scene: 0x138CC,
+        table: 0xA5254,
+        pool: 0x2C41C,
+        allocator: 0x1B158,
+        scenes: &[119, 127, 128, 126, 125],
+    },
+    HomeProfile {
+        init: 0x47752,
+        select: 0x47ADE,
+        scene: 0x8E948,
+        table: 0x91CC0,
+        pool: 0x294D8,
+        allocator: 0x19918,
+        scenes: &[115, 123, 124, 122, 121],
+    },
+    HomeProfile {
+        init: 0x4579E,
+        select: 0x45B2A,
+        scene: 0x8A430,
+        table: 0x8CA48,
+        pool: 0x28C54,
+        allocator: 0x1975C,
+        scenes: &[112, 120, 121, 119, 118],
+    },
+    HomeProfile {
+        init: 0x4CB6A,
+        select: 0x4CEF6,
+        scene: 0x13A5C,
+        table: 0xA6CD0,
+        pool: 0x2D508,
+        allocator: 0x1B4D4,
+        scenes: &[119, 127, 128, 126],
+    },
+];
+
+impl HomeProfile {
+    fn original_rows(&self) -> Vec<u8> {
+        self.scenes
+            .iter()
+            .enumerate()
+            .flat_map(|(i, &scene)| {
+                [34 + i as u32, scene, 0]
+                    .into_iter()
+                    .flat_map(u32::to_le_bytes)
+            })
+            .collect()
+    }
+
+    fn pool_size(&self, version: u32) -> u8 {
+        if version >= 2 && self.scenes.len() == 5 {
+            14
+        } else {
+            12
+        }
+    }
+}
+
 fn home_code_matches(bytes: &[u8], info: HomeMenuHelper) -> bool {
-    let (init, select, scene, table, subtract) = [
-        (0x4C436, 0x4C7C2, 0x138CC, 0xA5254, 0),
-        (0x47752, 0x47ADE, 0x8E948, 0x91CC0, 4),
-        (0x4579E, 0x45B2A, 0x8A430, 0x8CA48, 7),
-    ][info.profile];
-    let (pool, allocator) =
-        [(0x2C41C, 0x1B158), (0x294D8, 0x19918), (0x28C54, 0x1975C)][info.profile];
+    let profile = &HOME_PROFILES[info.profile];
+    let HomeProfile {
+        init,
+        select,
+        scene,
+        table,
+        pool,
+        allocator,
+        ..
+    } = *profile;
     // Six rows need thirteen widget objects (one list + two labels per row).
     // V2 grows the original twelve-slot pool to fourteen, keeping one spare.
-    let count = if info.version == 1 { 12 } else { 14 };
+    let count = profile.pool_size(info.version);
     if bytes.get(pool..pool + 6) != Some([count, 0x20, 0x19, 0x46, 0x1A, 0x46].as_slice())
         || bytes.get(pool + 6..pool + 10)
             != Some(thumb_branch(pool + 6, allocator, true).as_slice())
     {
         return false;
     }
-    let mut original = Vec::new();
-    for (label, scene) in [(34u32, 119u32), (35, 127), (36, 128), (37, 126), (38, 125)] {
-        for word in [label, scene - subtract, 0] {
-            original.extend(word.to_le_bytes());
-        }
-    }
+    let original = profile.original_rows();
     if bytes.get(table..table + original.len()) != Some(original.as_slice())
         || bytes.get(info.page..info.page + original.len()) != Some(original.as_slice())
         || bytes.get(init..init + 4) != Some(thumb_branch(init, info.page + 0x50, true).as_slice())
@@ -121,21 +190,25 @@ pub fn home_menu_helper(bytes: &[u8]) -> Result<Option<HomeMenuHelper>> {
         let Some(tail) = bytes.get(page + 0xA8..page + PAGE) else {
             return Err(bad());
         };
+        let profile = HOME_PROFILES.get(info.profile).ok_or_else(bad)?;
+        let paramix_row = profile.scenes.len() * 12;
         if read(0x88)? != version
             || read(0x8C)? as usize != page
             || read(0x98)? as usize != PAGE
             || read(0x9C)? != sum(0x80)
             || read(0xA4)? != sum(0xA4)
-            || info.profile >= 3
             || info.label == u32::MAX
             || !tail.iter().all(|&v| v == 255)
             || !(0x90000..0x110000).contains(&info.stub)
             || info.stub % PAGE != 0
-            || read(0x3C)? != info.label
-            || read(0x40)? != 0x7FFE
-            || read(0x44)? != 0
+            || read(paramix_row)? != info.label
+            || read(paramix_row + 4)? != 0x7FFE
+            || read(paramix_row + 8)? != 0
+            || !bytes[page + paramix_row + 12..page + 0x48]
+                .iter()
+                .all(|&v| v == 255)
             || read(0x48)? != ALIAS + (page - DELTA) as u32
-            || read(0x4C)? != 6
+            || read(0x4C)? != profile.scenes.len() as u32 + 1
             || read(0x70)? != (ALIAS + (info.stub + 0x20 - DELTA) as u32 | 1)
             || u32_at(bytes, info.stub + 0x20) != Some(0x4C01B672)
         {
@@ -285,6 +358,15 @@ pub fn reserved_ranges(bytes: &[u8]) -> Result<Vec<Range<usize>>> {
                 add(&mut ranges, bytes, start, size)?;
             }
         }
+        if read(36)? & 0x1000 != 0 {
+            if slots != 3 || read(8)? != 0xD25000 || read(12)? != 0x20000
+                || read(364)? != 0 || read(368)? != 0
+            {
+                return Err(bad());
+            }
+            // The recovery journal and active-slot record precede the three slots.
+            add(&mut ranges, bytes, 0xD23000, 2 * PAGE)?;
+        }
         // V11 adds an explicitly owned extension after the six-field assets.
         // Erased pages in it are still save capacity, never spare patch space.
         if version >= 11 {
@@ -379,6 +461,15 @@ pub fn requested_shortcut_stub(bytes: &[u8]) -> Result<Option<usize>> {
     Ok((flags & F_NO_SHORTCUT == 0).then_some(stub))
 }
 
+/// An installed menu catalog may embed absolute addresses into the sprite pack.
+pub(crate) fn uses_sprite_addresses(bytes: &[u8]) -> bool {
+    (0x90000..0x110000).step_by(PAGE).any(|off| {
+        let config = off + 0x140;
+        u32_at(bytes, config) == Some(FELD)
+            && u32_at(bytes, config + 272).is_some_and(|ptr| ptr != 0)
+    })
+}
+
 pub fn guard_growth(bytes: &[u8], old_end: usize, new_end: usize) -> Result<()> {
     if new_end <= old_end {
         return Ok(());
@@ -430,23 +521,25 @@ fn install_home_fixture_version(
     version: u32,
 ) {
     install_fixture(bytes, 0x100000);
-    let (table, init, select, scene, subtract) = [
-        (0xA5254, 0x4C436, 0x4C7C2, 0x138CC, 0),
-        (0x91CC0, 0x47752, 0x47ADE, 0x8E948, 4),
-        (0x8CA48, 0x4579E, 0x45B2A, 0x8A430, 7),
-    ][profile];
+    let home = &HOME_PROFILES[profile];
+    let HomeProfile {
+        init,
+        select,
+        scene,
+        table,
+        pool,
+        allocator,
+        ..
+    } = *home;
     bytes[page..page + PAGE].fill(255);
-    let mut words = Vec::new();
-    for (text, scene) in [(34u32, 119u32), (35, 127), (36, 128), (37, 126), (38, 125)] {
-        for w in [text, scene - subtract, 0] {
-            words.extend(w.to_le_bytes());
-        }
-    }
+    let mut words = home.original_rows();
     bytes[table..table + words.len()].copy_from_slice(&words);
-    for word in [label, 0x7FFE, 0, ALIAS + (page - DELTA) as u32, 6] {
+    for word in [label, 0x7FFE, 0] {
         words.extend(word.to_le_bytes());
     }
     bytes[page..page + words.len()].copy_from_slice(&words);
+    bytes[page + 0x48..page + 0x4C].copy_from_slice(&(ALIAS + (page - DELTA) as u32).to_le_bytes());
+    bytes[page + 0x4C..page + 0x50].copy_from_slice(&(home.scenes.len() as u32 + 1).to_le_bytes());
     let pointer = ALIAS + (page + 0x48 - DELTA) as u32;
     let mut code = thumb_mov(0, pointer as u16, false).to_vec();
     code.extend(thumb_mov(0, (pointer >> 16) as u16, true));
@@ -460,15 +553,7 @@ fn install_home_fixture_version(
     bytes[page + 0x60..page + 0x60 + code.len()].copy_from_slice(&code);
     bytes[init..init + 4].copy_from_slice(&thumb_branch(init, page + 0x50, true));
     bytes[select..select + 4].copy_from_slice(&thumb_branch(select, page + 0x60, true));
-    let (pool, allocator) = [(0x2C41C, 0x1B158), (0x294D8, 0x19918), (0x28C54, 0x1975C)][profile];
-    bytes[pool..pool + 6].copy_from_slice(&[
-        if version == 1 { 12 } else { 14 },
-        0x20,
-        0x19,
-        0x46,
-        0x1A,
-        0x46,
-    ]);
+    bytes[pool..pool + 6].copy_from_slice(&[home.pool_size(version), 0x20, 0x19, 0x46, 0x1A, 0x46]);
     bytes[pool + 6..pool + 10].copy_from_slice(&thumb_branch(pool + 6, allocator, true));
     bytes[page + 0x80..page + 0x88].copy_from_slice(if version == 1 {
         HOME_MARKER_V1
@@ -502,7 +587,7 @@ mod tests {
     use super::*;
     #[test]
     fn home_menu_shortcut_has_an_independent_reservation_and_no_settings_duplicate() {
-        for profile in 0..3 {
+        for profile in 0..HOME_PROFILES.len() {
             let mut bytes = vec![255; 0x1000000];
             install_home_fixture(&mut bytes, profile, 0x10E000, 824);
             let info = home_menu_helper(&bytes).unwrap().unwrap();
@@ -525,14 +610,14 @@ mod tests {
 
     #[test]
     fn legacy_home_helper_requires_the_original_pool_and_v2_requires_the_expanded_pool() {
-        for profile in 0..3 {
-            let pool = [0x2C41C, 0x294D8, 0x28C54][profile];
+        for (profile, home) in HOME_PROFILES.iter().enumerate() {
+            let pool = home.pool;
             for version in [1, 2] {
                 let mut bytes = vec![255; 0x1000000];
                 install_home_fixture_version(&mut bytes, profile, 0x10E000, 824, version);
                 assert_eq!(home_menu_helper(&bytes).unwrap().unwrap().version, version);
                 assert_eq!(requested_shortcut_stub(&bytes).unwrap(), None);
-                bytes[pool] = if version == 1 { 14 } else { 12 };
+                bytes[pool] = home.pool_size(version) ^ 2;
                 assert!(
                     home_menu_helper(&bytes).is_err(),
                     "profile {profile}, version {version}"

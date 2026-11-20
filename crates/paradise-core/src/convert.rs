@@ -18,6 +18,14 @@ pub enum Variant {
 }
 
 impl Variant {
+    pub fn output_suffix(self) -> &'static str {
+        match self {
+            Variant::HongKong => "zh-hk",
+            Variant::Taiwan => "zh-tw",
+            Variant::Standard => "zht",
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Variant::HongKong => "Traditional (Hong Kong)",

@@ -117,15 +117,25 @@ fn install_cjk_font(ctx: &egui::Context) {
     }
 }
 
-fn default_output(name: &str, dir: Option<&std::path::Path>) -> String {
+fn default_output(name: &str, dir: Option<&std::path::Path>, variant: Variant) -> String {
     let stem = std::path::Path::new(name)
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("rom");
-    let file = format!("{stem}_zh-hk.bin");
+    let file = format!("{stem}_{}.bin", variant.output_suffix());
     match dir {
         Some(d) => d.join(file).display().to_string(),
         None => file,
+    }
+}
+
+impl LoadedRom {
+    fn default_output(&self, variant: Variant) -> String {
+        default_output(
+            &self.name,
+            self.path.as_deref().and_then(|p| p.parent()),
+            variant,
+        )
     }
 }
 
@@ -256,13 +266,14 @@ impl App {
         });
         match result {
             Ok((bytes, rom)) => {
-                self.output = default_output(&name, path.as_deref().and_then(|p| p.parent()));
-                self.loaded = Some(LoadedRom {
+                let loaded = LoadedRom {
                     info: rom.info().clone(),
                     name,
                     path,
                     bytes: Arc::new(bytes),
-                });
+                };
+                self.output = loaded.default_output(self.variant);
+                self.loaded = Some(loaded);
                 self.load_error = None;
             }
             Err(e) => {
@@ -423,6 +434,11 @@ impl App {
                 ui.label("Size");
                 ui.label(format!("{} bytes", i.rom_len));
                 ui.end_row();
+                if let Some((name, id)) = i.edition_name().zip(i.edition) {
+                    ui.label("Edition");
+                    ui.label(format!("{id} ({name})"));
+                    ui.end_row();
+                }
                 ui.label("Signature");
                 ui.label(if i.signature_ok {
                     "Sonix header found"
@@ -458,6 +474,7 @@ impl App {
         let busy = self.busy();
         egui::Grid::new("opts").num_columns(2).show(ui, |ui| {
             ui.label("Target");
+            let previous_variant = self.variant;
             egui::ComboBox::from_id_salt("variant")
                 .selected_text(self.variant.label())
                 .show_ui(ui, |ui| {
@@ -465,6 +482,13 @@ impl App {
                         ui.selectable_value(&mut self.variant, v, v.label());
                     }
                 });
+            if self.variant != previous_variant {
+                if let Some(loaded) = &self.loaded {
+                    if self.output == loaded.default_output(previous_variant) {
+                        self.output = loaded.default_output(self.variant);
+                    }
+                }
+            }
             ui.end_row();
             ui.label("Glyph font");
             ui.horizontal_wrapped(|ui| {
@@ -616,6 +640,9 @@ impl App {
                 "{} -> {} bytes",
                 r.asset_len_before, r.asset_len_after
             ));
+            if r.font_grew {
+                ui.label("The CJK font grew and moved later sprites.");
+            }
             ui.end_row();
             if r.latin_glyphs > 0 {
                 ui.label("Latin glyphs redrawn");

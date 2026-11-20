@@ -51,7 +51,7 @@ impl Profile {
     }
 }
 
-const PROFILES: [Profile; 3] = [
+const PROFILES: [Profile; 4] = [
     // Glacier and Tropical
     Profile {
         page1_table: 0xA4FFC,
@@ -96,6 +96,21 @@ const PROFILES: [Profile; 3] = [
         scene_settings: 53,
         scene_datetime: 107,
         inline_set_scene: false,
+    },
+    // Neon Planet
+    Profile {
+        page1_table: 0xA6A4C,
+        page1_original: [28, 73, 0, 27, 74, 0, 26, 0, 0],
+        page1_ptr: 0x589A4,
+        language_next_scene: 0x34994,
+        settings_dispatch: 0x58A7E,
+        set_scene: 0x13A5C,
+        state_site: 0x13A66,
+        state_addr: 0x1800_136C,
+        scene_language: 113,
+        scene_settings: 58,
+        scene_datetime: 114,
+        inline_set_scene: true,
     },
 ];
 

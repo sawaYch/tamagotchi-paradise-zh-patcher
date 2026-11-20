@@ -103,7 +103,7 @@ enum Command {
     /// Convert the Chinese text and font, writing a new ROM
     Patch {
         rom: PathBuf,
-        /// Output ROM path (default: <name>_zh-hk.bin next to the input)
+        /// Output ROM path (defaults to <name>_zh-hk.bin, <name>_zh-tw.bin, or <name>_zht.bin)
         #[arg(short, long)]
         output: Option<PathBuf>,
         #[arg(long, value_enum, default_value = "hk")]
@@ -155,15 +155,18 @@ fn read_rom(path: &Path) -> Result<Rom> {
     Ok(Rom::load(bytes)?)
 }
 
-fn default_output(input: &Path) -> PathBuf {
+fn default_output(input: &Path, variant: Variant) -> PathBuf {
     let stem = input.file_stem().and_then(|s| s.to_str()).unwrap_or("rom");
-    input.with_file_name(format!("{stem}_zh-hk.bin"))
+    input.with_file_name(format!("{stem}_{}.bin", variant.output_suffix()))
 }
 
 fn inspect(path: &Path) -> Result<()> {
     let rom = read_rom(path)?;
     let i = rom.info();
     println!("ROM size:             {} bytes", i.rom_len);
+    if let Some((name, id)) = i.edition_name().zip(i.edition) {
+        println!("Edition:              {id} ({name})");
+    }
     println!(
         "Sonix signature:      {}",
         if i.signature_ok { "ok" } else { "missing" }
@@ -214,7 +217,8 @@ fn do_patch(rom_path: &Path, args: PatchArgs) -> Result<()> {
         force,
     } = args;
     let rom = read_rom(rom_path)?;
-    let out_path = output.unwrap_or_else(|| default_output(rom_path));
+    let variant = Variant::from(variant);
+    let out_path = output.unwrap_or_else(|| default_output(rom_path, variant));
     if !dry_run {
         if out_path == rom_path {
             bail!("output path must differ from the input ROM");
@@ -227,7 +231,7 @@ fn do_patch(rom_path: &Path, args: PatchArgs) -> Result<()> {
         }
     }
     let opts = PatchOptions {
-        variant: variant.into(),
+        variant,
         font: font.into(),
         runtime_language,
         redraw_shared,
@@ -251,6 +255,12 @@ fn do_patch(rom_path: &Path, args: PatchArgs) -> Result<()> {
             r.stats.restyle_skipped
         );
     }
+    if r.stats.unidentified_glyphs > 0 {
+        println!(
+            "Existing glyphs kept (identity uncertain): {}",
+            r.stats.unidentified_glyphs
+        );
+    }
     println!("Glyph font:             {}", opts.font.label());
     println!("Latin glyphs redrawn:   {}", r.latin_glyphs);
     if r.fallback_glyphs > 0 {
@@ -263,6 +273,9 @@ fn do_patch(rom_path: &Path, args: PatchArgs) -> Result<()> {
         "Asset size:           {} -> {} bytes",
         r.asset_len_before, r.asset_len_after
     );
+    if r.font_grew {
+        println!("CJK font exceeded its original slot; later sprites were relocated.");
+    }
     println!(
         "Settings > Language:  {}",
         runtime_language_label(r.runtime_language)
