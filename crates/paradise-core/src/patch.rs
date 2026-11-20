@@ -270,6 +270,7 @@ pub fn patch(rom: &Rom, opts: &PatchOptions, progress: &mut dyn FnMut(&str)) -> 
     }
     let zh = &tables[info.zh_table];
     let pending_names = crate::neon_names::pending(rom, zh.strings.len())?;
+    let awaits_translation = |index| pending_names.iter().any(|range| range.contains(&index));
     let others: Vec<&StringTable> = tables
         .iter()
         .enumerate()
@@ -279,16 +280,16 @@ pub fn patch(rom: &Rom, opts: &PatchOptions, progress: &mut dyn FnMut(&str)) -> 
 
     progress("Converting text and planning glyphs");
     let repatch = font.uses_legacy_lz4() && already_traditional(&tables, info.zh_table, &cs);
-    if repatch && pending_names.is_none() && opts.mapping.as_ref().is_some_and(|m| !m.is_empty()) {
+    if repatch && pending_names.is_empty() && opts.mapping.as_ref().is_some_and(|m| !m.is_empty()) {
         return Err(Error::Unsupported(
             "text mappings need the pre-translation ROM because an existing patch reuses glyph codes; font changes can use this ROM directly".into(),
         ));
     }
     let plan = if repatch {
-        if let Some(names) = &pending_names {
+        if !pending_names.is_empty() {
             let (mut retained, mut incoming) = (zh.clone(), zh.clone());
             for i in 0..zh.strings.len() {
-                if names.contains(&i) {
+                if awaits_translation(i) {
                     retained.strings[i] = vec![0];
                 } else {
                     incoming.strings[i] = vec![0];
@@ -311,7 +312,7 @@ pub fn patch(rom: &Rom, opts: &PatchOptions, progress: &mut dyn FnMut(&str)) -> 
             plan.stats.unidentified_glyphs += existing.stats.unidentified_glyphs;
             plan.edits.extend(existing.edits);
             for (i, row) in plan.table.strings.iter_mut().enumerate() {
-                if !names.contains(&i) {
+                if !awaits_translation(i) {
                     row.clone_from(&zh.strings[i]);
                 }
             }
@@ -383,7 +384,7 @@ pub fn patch(rom: &Rom, opts: &PatchOptions, progress: &mut dyn FnMut(&str)) -> 
     }
     patched.set_font(&font);
     let mut bytes = patched.to_bytes()?;
-    if pending_names.is_some() {
+    if !pending_names.is_empty() {
         crate::neon_names::mark_converted(&mut bytes);
     }
     if settings_changed {
@@ -393,10 +394,7 @@ pub fn patch(rom: &Rom, opts: &PatchOptions, progress: &mut dyn FnMut(&str)) -> 
 
     let mut remaining: BTreeMap<char, usize> = BTreeMap::new();
     for (_, s) in plan.table.strings.iter().enumerate().filter(|(i, _)| {
-        !repatch
-            || pending_names
-                .as_ref()
-                .is_some_and(|names| names.contains(i))
+        !repatch || awaits_translation(*i)
     }) {
         for &c in s {
             if cs.is_hanzi_code(c) {
@@ -521,7 +519,7 @@ pub fn verify_with(
         .min(patched.len());
     let mut expected_head = original.to_vec();
     let original_pending = crate::neon_names::pending(&a, ta[ia.zh_table].strings.len())?;
-    if original_pending.is_some() && crate::neon_names::converted(patched) {
+    if !original_pending.is_empty() && crate::neon_names::converted(patched) {
         crate::neon_names::mark_converted(&mut expected_head);
     }
     if expected_head[..head] != patched[..head]

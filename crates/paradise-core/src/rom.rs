@@ -197,6 +197,12 @@ impl Rom {
         &self.info
     }
 
+    /// Transplanted Neon item count and whether the Chinese names were converted.
+    pub fn neon_items(&self) -> Result<Option<(usize, bool)>> {
+        Ok(crate::neon_names::item_names(self, self.info.zh_string_count)?
+            .map(|(names, translated)| (names.len(), translated)))
+    }
+
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
     }

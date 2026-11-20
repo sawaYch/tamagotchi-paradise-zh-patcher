@@ -32,6 +32,12 @@ save slots. It does not require a full flash rewrite.
   Existing marked patches and the legacy unmarked B6000 patch are recognized.
   Verification reproduces the exact helper location, rather than allocating
   another page. Unknown Paramix layouts and occupied helper space are refused.
+- Six-field ROMs with the 59 Neon items include an `NZI1` manifest at
+  `0x107FD0`. The patcher validates the item records, translates their names
+  and preserves the existing glyph assignments when the base is already in
+  Traditional Chinese. The CLI `inspect` command reports the item count and
+  name status. Later font changes preserve the translated text, sprite
+  references, animation scripts and saved inventory.
 
 ## Recommended workflow
 

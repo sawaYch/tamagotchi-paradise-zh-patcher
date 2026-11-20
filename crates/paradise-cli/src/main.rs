@@ -167,6 +167,14 @@ fn inspect(path: &Path) -> Result<()> {
     if let Some((name, id)) = i.edition_name().zip(i.edition) {
         println!("Edition:              {id} ({name})");
     }
+    if let Some((count, translated)) = rom.neon_items()? {
+        let names = if translated {
+            "Traditional Chinese names"
+        } else {
+            "original names"
+        };
+        println!("Neon items:           {count} ({names})");
+    }
     println!(
         "Sonix signature:      {}",
         if i.signature_ok { "ok" } else { "missing" }
