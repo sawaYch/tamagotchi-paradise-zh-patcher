@@ -7,7 +7,8 @@ use crate::error::{Error, Result};
 pub const PAGE: usize = 0x1000;
 /// Persisted Studio preference: keep the menu installed, but do not add its
 /// shortcut automatically when another tool adds a Language row.
-pub const F_NO_SHORTCUT: u32 = 128;
+pub const F_NO_SHORTCUT: u32 = 0x2000;
+const LEGACY_SHORTCUT_FLAG: u32 = 0x80;
 const FELD: u32 = 0x444C4546;
 const PCAT: u32 = 0x54414350;
 const PEXT: u32 = 0x54584550;
@@ -457,8 +458,16 @@ pub fn requested_shortcut_stub(bytes: &[u8]) -> Result<Option<usize>> {
         return Ok(None);
     };
     let off = from_alias(u32_at(bytes, stub + 0x28).ok_or_else(bad)?).ok_or_else(bad)?;
-    let flags = u32_at(bytes, off + 0x140 + 36).ok_or_else(bad)?;
-    Ok((flags & F_NO_SHORTCUT == 0).then_some(stub))
+    let config = off + 0x140;
+    let flags = u32_at(bytes, config + 36).ok_or_else(bad)?;
+    let neon = u32_at(bytes, config + 28) == Some(0xD85000);
+    let old_fork = !neon
+        || (flags & 0x200 != 0
+            && bytes[off..(off + 0x10000).min(bytes.len())]
+                .windows(b"PMXVER:1.7.5-".len())
+                .any(|tag| tag == b"PMXVER:1.7.5-"));
+    let disabled = flags & F_NO_SHORTCUT != 0 || (old_fork && flags & LEGACY_SHORTCUT_FLAG != 0);
+    Ok((!disabled).then_some(stub))
 }
 
 /// An installed menu catalog may embed absolute addresses into the sprite pack.
@@ -687,5 +696,13 @@ mod tests {
         assert_eq!(requested_shortcut_stub(&b).unwrap(), None);
         b[at..at + 4].copy_from_slice(&flags.to_le_bytes());
         assert_eq!(requested_shortcut_stub(&b).unwrap(), Some(0xB6000));
+        b[at..at + 4].copy_from_slice(&(flags | LEGACY_SHORTCUT_FLAG).to_le_bytes());
+        assert_eq!(requested_shortcut_stub(&b).unwrap(), None);
+        b[at - 8..at - 4].copy_from_slice(&0xD85000u32.to_le_bytes());
+        assert_eq!(requested_shortcut_stub(&b).unwrap(), Some(0xB6000));
+        b[at..at + 4].copy_from_slice(&(flags | LEGACY_SHORTCUT_FLAG | 0x200).to_le_bytes());
+        let tag = b"PMXVER:1.7.5-plus.45";
+        b[0xB7500..0xB7500 + tag.len()].copy_from_slice(tag);
+        assert_eq!(requested_shortcut_stub(&b).unwrap(), None);
     }
 }

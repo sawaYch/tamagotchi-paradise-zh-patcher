@@ -49,7 +49,7 @@ impl RomInfo {
 fn detect_edition(bytes: &[u8]) -> Option<u32> {
     [
         (0xD85000, 7..=7),
-        (0xD29000, 5..=6),
+        (0xD29000, 4..=6),
         (0xD49000, 1..=4),
         (0xEFD000, 1..=7), // Edition page copied here by Paramix Clean ROM.
     ]
@@ -62,6 +62,17 @@ fn detect_edition(bytes: &[u8]) -> Option<u32> {
             return None;
         }
         let footer = word(0xFF8);
+        if id == 4
+            && matches!(at, 0xD29000 | 0xEFD000)
+            && footer.wrapping_add(id) == EDITIONS[4].1
+            && word(0xFFC) == !footer
+        {
+            // Forest and Sky on a Tropical/Glacier board share this ID page.
+            return Some(5);
+        }
+        if id == 4 && at == 0xD29000 {
+            return None;
+        }
         (footer.wrapping_add(id) == EDITIONS[id as usize - 1].1 && word(0xFFC) == !footer)
             .then_some(id)
     })
