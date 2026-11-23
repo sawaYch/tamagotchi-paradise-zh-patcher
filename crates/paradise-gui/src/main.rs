@@ -763,9 +763,26 @@ impl eframe::App for App {
                 self.options_section(ui, &ctx);
                 ui.separator();
                 self.result_section(ui);
+                ui.add_space(18.0);
             });
         });
+        show_version(&ctx);
     }
+}
+
+fn show_version(ctx: &egui::Context) {
+    egui::Area::new(egui::Id::unique("app_version"))
+        .anchor(egui::Align2::RIGHT_BOTTOM, [-12.0, -8.0])
+        .order(egui::Order::Foreground)
+        .interactable(false)
+        .fade_in(false)
+        .show(ctx, |ui| {
+            ui.label(
+                egui::RichText::new(format!("v{}", env!("CARGO_PKG_VERSION")))
+                    .small()
+                    .weak(),
+            );
+        });
 }
 
 #[cfg(not(target_arch = "wasm32"))]

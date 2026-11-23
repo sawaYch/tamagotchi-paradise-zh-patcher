@@ -1537,7 +1537,7 @@ dependencies = [
 
 [[package]]
 name = "glyphpack-gen"
-version = "0.1.0"
+version = "0.1.9"
 dependencies = [
  "anyhow",
 ]
@@ -2556,7 +2556,7 @@ dependencies = [
 
 [[package]]
 name = "paradise-cli"
-version = "0.1.0"
+version = "0.1.9"
 dependencies = [
  "anyhow",
  "clap",
@@ -2565,7 +2565,7 @@ dependencies = [
 
 [[package]]
 name = "paradise-core"
-version = "0.1.0"
+version = "0.1.9"
 dependencies = [
  "encoding_rs",
  "ferrous-opencc",
@@ -2576,7 +2576,7 @@ dependencies = [
 
 [[package]]
 name = "paradise-gui"
-version = "0.1.0"
+version = "0.1.9"
 dependencies = [
  "anyhow",
  "eframe",
