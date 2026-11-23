@@ -10,3 +10,4 @@ encoding_rs.workspace = true
 png.workspace = true
 ferrous-opencc = { version = "0.4", default-features = false, features = ["s2t-conversion"] }
 serde_json = "1"
+lz4_flex = { version = "0.11.6", default-features = false, features = ["std", "safe-decode"] }

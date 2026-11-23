@@ -103,7 +103,7 @@ enum Command {
     /// Convert the Chinese text and font, writing a new ROM
     Patch {
         rom: PathBuf,
-        /// Output ROM path (default: <name>_zh-hk.bin next to the input)
+        /// Output ROM path (defaults to <name>_zh-hk.bin, <name>_zh-tw.bin, or <name>_zht.bin)
         #[arg(short, long)]
         output: Option<PathBuf>,
         #[arg(long, value_enum, default_value = "hk")]
@@ -155,20 +155,31 @@ fn read_rom(path: &Path) -> Result<Rom> {
     Ok(Rom::load(bytes)?)
 }
 
-fn default_output(input: &Path) -> PathBuf {
+fn default_output(input: &Path, variant: Variant) -> PathBuf {
     let stem = input.file_stem().and_then(|s| s.to_str()).unwrap_or("rom");
-    input.with_file_name(format!("{stem}_zh-hk.bin"))
+    input.with_file_name(format!("{stem}_{}.bin", variant.output_suffix()))
 }
 
 fn inspect(path: &Path) -> Result<()> {
     let rom = read_rom(path)?;
     let i = rom.info();
     println!("ROM size:             {} bytes", i.rom_len);
+    if let Some((name, id)) = i.edition_name().zip(i.edition) {
+        println!("Edition:              {id} ({name})");
+    }
+    if let Some((count, translated)) = rom.neon_items()? {
+        let names = if translated {
+            "Traditional Chinese names"
+        } else {
+            "original names"
+        };
+        println!("Neon items:           {count} ({names})");
+    }
     println!(
         "Sonix signature:      {}",
         if i.signature_ok { "ok" } else { "missing" }
     );
-    println!("Asset archive:        {} bytes at 0x111000", i.asset_len);
+    println!("Asset archive:        {} bytes at {:#x}", i.asset_len, i.asset_base);
     println!(
         "Archive checksums:    {}",
         if i.top_checksum_ok && i.strings_checksum_ok {
@@ -186,6 +197,10 @@ fn inspect(path: &Path) -> Result<()> {
         "Chinese string table: #{} ({} strings, {} distinct hanzi)",
         i.zh_table, i.zh_string_count, i.zh_hanzi_distinct
     );
+    if let Some(startup) = rom.startup()? {
+        println!("Startup Chinese table: #{} ({} strings)", startup.info().zh_table,
+            startup.info().zh_string_count);
+    }
     Ok(())
 }
 
@@ -214,7 +229,8 @@ fn do_patch(rom_path: &Path, args: PatchArgs) -> Result<()> {
         force,
     } = args;
     let rom = read_rom(rom_path)?;
-    let out_path = output.unwrap_or_else(|| default_output(rom_path));
+    let variant = Variant::from(variant);
+    let out_path = output.unwrap_or_else(|| default_output(rom_path, variant));
     if !dry_run {
         if out_path == rom_path {
             bail!("output path must differ from the input ROM");
@@ -227,7 +243,7 @@ fn do_patch(rom_path: &Path, args: PatchArgs) -> Result<()> {
         }
     }
     let opts = PatchOptions {
-        variant: variant.into(),
+        variant,
         font: font.into(),
         runtime_language,
         redraw_shared,
@@ -240,6 +256,17 @@ fn do_patch(rom_path: &Path, args: PatchArgs) -> Result<()> {
         "Strings changed:      {} of {}",
         r.stats.strings_changed, r.stats.strings_total
     );
+    if let Some(startup) = &r.startup {
+        println!("Startup strings changed: {} of {}", startup.stats.strings_changed,
+            startup.stats.strings_total);
+        for unresolved in &startup.unresolved {
+            println!("Startup unresolved: {} -> {} x{} ({})", unresolved.source,
+                unresolved.target, unresolved.count, unresolved.reason);
+        }
+        for &(ch, count) in &startup.remaining_simplified {
+            println!("Startup Simplified character remaining: {ch} x{count}");
+        }
+    }
     println!("Characters converted: {}", r.stats.chars_converted);
     println!("Existing glyphs reused: {}", r.stats.reused_codes);
     println!("Glyph slots reskinned:  {}", r.stats.reskinned);
@@ -249,6 +276,12 @@ fn do_patch(rom_path: &Path, args: PatchArgs) -> Result<()> {
         println!(
             "Shared glyphs kept in the game's style (no spare slot): {}",
             r.stats.restyle_skipped
+        );
+    }
+    if r.stats.unidentified_glyphs > 0 {
+        println!(
+            "Existing glyphs kept (identity uncertain): {}",
+            r.stats.unidentified_glyphs
         );
     }
     println!("Glyph font:             {}", opts.font.label());
@@ -263,6 +296,9 @@ fn do_patch(rom_path: &Path, args: PatchArgs) -> Result<()> {
         "Asset size:           {} -> {} bytes",
         r.asset_len_before, r.asset_len_after
     );
+    if r.font_grew {
+        println!("CJK font exceeded its original slot; later sprites were relocated.");
+    }
     println!(
         "Settings > Language:  {}",
         runtime_language_label(r.runtime_language)
@@ -329,10 +365,20 @@ fn do_strings(
         println!("Wrote {}", path.display());
         return Ok(());
     }
-    for (i, s) in table.strings.iter().enumerate() {
-        let text = describe(&cs, s);
-        if !text.is_empty() && grep.is_none_or(|g| text.contains(g)) {
-            println!("{:>4}  {text}", i + 1);
+    let startup = rom.startup()?;
+    let mut scopes = vec![("Main", table)];
+    if let Some(startup) = &startup {
+        scopes.push(("Startup", startup.table(startup.info().zh_table)?));
+    }
+    for (label, table) in scopes {
+        if startup.is_some() {
+            println!("[{label}]");
+        }
+        for (i, s) in table.strings.iter().enumerate() {
+            let text = describe(&cs, s);
+            if !text.is_empty() && grep.is_none_or(|g| text.contains(g)) {
+                println!("{:>4}  {text}", i + 1);
+            }
         }
     }
     Ok(())
